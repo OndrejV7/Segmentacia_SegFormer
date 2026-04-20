@@ -1,0 +1,26 @@
+# ── Dataset (large files, stay on OneDrive) ──
+Source_Images/
+Python_training_resources/*/images/
+Python_training_resources/*/masks/
+Python_training_resources/verification/
+
+# ── Model weights ──
+*.pth
+*.onnx
+
+# ── Matlab labelling data ──
+Matlab_labelling/
+
+# ── Archives ──
+Archives/
+
+# ── Python cache ──
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+# ── OS ──
+.DS_Store
+Thumbs.db
+desktop.ini

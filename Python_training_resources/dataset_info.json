@@ -1,0 +1,47 @@
+{
+  "project": "SegFormer semantic segmentation - tree cross-sections",
+  "description": "Annotated CT/scan cross-sections of oak and pine trunks. Masks contain uint8 values 1-5 (MATLAB PixelLabelID). Subtract 1 for 0-indexed class IDs expected by most frameworks.",
+  "mask_format": {
+    "dtype": "uint8",
+    "values": "1-5 (MATLAB convention, 1-indexed)",
+    "note": "Use mask - 1 to convert to 0-indexed class IDs for training"
+  },
+  "classes": [
+    {"id_matlab": 1, "id_python": 0, "name": "Okolie",        "description": "Surroundings / background", "color_rgb": [0, 114, 189]},
+    {"id_matlab": 2, "id_python": 1, "name": "Kora",          "description": "Bark",                      "color_rgb": [0, 255, 0]},
+    {"id_matlab": 3, "id_python": 2, "name": "Drevo",         "description": "Wood",                      "color_rgb": [237, 177, 32]},
+    {"id_matlab": 4, "id_python": 3, "name": "Nezdrava_hrca", "description": "Unhealthy knot",            "color_rgb": [209, 4, 139]},
+    {"id_matlab": 5, "id_python": 4, "name": "Prasklina",     "description": "Crack",                     "color_rgb": [15, 255, 255]}
+  ],
+  "num_classes": 5,
+  "image_format": "TIFF (.tif)",
+  "mask_format_ext": "PNG (.png)",
+  "pairing": "Mask filename = image basename + .png  (e.g. image: abc.tif -> mask: abc.png)",
+  "datasets": [
+    {"name": "kmen1",     "type": "kmen", "num_pairs": 64,  "notes": ""},
+    {"name": "kmen2",     "type": "kmen", "num_pairs": 64,  "notes": ""},
+    {"name": "kmen3",     "type": "kmen", "num_pairs": 128, "notes": "Two scan passes merged into one dataset"},
+    {"name": "kmen4",     "type": "kmen", "num_pairs": 64,  "notes": ""},
+    {"name": "kmen5",     "type": "kmen", "num_pairs": 64,  "notes": ""},
+    {"name": "kmen6",     "type": "kmen", "num_pairs": 64,  "notes": ""},
+    {"name": "kmen7",     "type": "kmen", "num_pairs": 64,  "notes": ""},
+    {"name": "kmen8",     "type": "kmen", "num_pairs": 64,  "notes": ""},
+    {"name": "kmen9",     "type": "kmen", "num_pairs": 64,  "notes": ""},
+    {"name": "kmen10",    "type": "kmen", "num_pairs": 64,  "notes": ""},
+    {"name": "Dub_1",    "type": "dub",  "num_pairs": 65,  "notes": ""},
+    {"name": "Dub_2",    "type": "dub",  "num_pairs": 65,  "notes": ""},
+    {"name": "Dub_3b",   "type": "dub",  "num_pairs": 64,  "notes": ""},
+    {"name": "Dub_4",    "type": "dub",  "num_pairs": 65,  "notes": ""},
+    {"name": "Dub_5",    "type": "dub",  "num_pairs": 64,  "notes": "No gTruth .mat file; labels reconstructed from PixelLabelData_14. One image (120-234_1_out_page_0506.tif) had no annotation and was excluded."},
+    {"name": "Dub_6",    "type": "dub",  "num_pairs": 64,  "notes": ""},
+    {"name": "Dub_7",    "type": "dub",  "num_pairs": 64,  "notes": ""},
+    {"name": "Dub_8",    "type": "dub",  "num_pairs": 64,  "notes": ""},
+    {"name": "Dub_9",    "type": "dub",  "num_pairs": 64,  "notes": ""},
+    {"name": "Dub_10",   "type": "dub",  "num_pairs": 64,  "notes": ""},
+    {"name": "hrce_mixed","type": "mixed","num_pairs": 94,  "notes": "Mixed oak dataset. Two images (098.tif, 099.tif) had no annotation and were excluded. Original source had 96 images."}
+  ],
+  "total_pairs": 1441,
+  "kmen_series_total": 704,
+  "dub_series_total": 643,
+  "mixed_total": 94
+}
