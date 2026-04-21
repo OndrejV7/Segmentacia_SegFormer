@@ -156,7 +156,7 @@ def get_train_transform():
         A.Resize(IMAGE_SIZE, IMAGE_SIZE),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
-        A.Rotate(limit=180, border_mode=0, value=0, mask_value=3, p=1.0),
+        A.Rotate(limit=180, border_mode=0, fill=0, fill_mask=3, p=1.0),
         A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ToTensorV2(),
     ])

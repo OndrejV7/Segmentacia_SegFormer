@@ -1,16 +1,14 @@
 """
-SegFormer-B2  --  Phase 2 Training
+SegFormer-B2  --  Phase 2 Training  [v2: Warmup + CosineAnnealingLR]
 Loss: 35% Weighted CrossEntropy + 65% Weighted Dice  (refinement)
+LR schedule: lineárny warmup (5 epôch: 1e-5 -> 1e-4)
+             + kosínusový pokles (75 epôch: 1e-4 -> 1e-8)
 
-Loads Phase 1 weights (net_segformer_b2_p1.pth) and fine-tunes.
-Same trunk-level train/val split as Phase 1.
-
-Run after Phase 1 completes:
-    python train_segformer_phase2.py
+Loads Phase 1 weights (net_segformer_b2_p1.pth).
 
 Outputs:
-  net_segformer_b2_p2.pth     -- best Phase 2 model weights
-  training_history_p2.json    -- per-epoch metrics
+  net_segformer_b2_p2_v2.pth     -- best Phase 2 v2 model weights
+  training_history_p2_v2.json    -- per-epoch metrics
 """
 
 import random
@@ -52,15 +50,16 @@ OVERSAMPLE_PRASKLINA = 6
 OVERSAMPLE_NEZDRAVA  = 3
 
 # Phase 2 config
-NUM_EPOCHS  = 80
-LR          = 3e-5      # optimum nájdené z warmup experimentu (v2 peak ep4)
-PATIENCE    = 20
-CE_WEIGHT   = 0.35
-DICE_WEIGHT = 0.65
+NUM_EPOCHS     = 80
+LR             = 3.2e-5 # peak na úrovni optima z predchádzajúceho warmup experimentu
+WARMUP_EPOCHS  = 5      # lineárny nástup: 10% LR -> LR (3.2e-6 -> 3.2e-5)
+PATIENCE       = 20
+CE_WEIGHT      = 0.35
+DICE_WEIGHT    = 0.65
 
 PHASE1_PATH  = DATA_DIR / "net_segformer_b2_p1.pth"
-SAVE_PATH    = DATA_DIR / "net_segformer_b2_p2.pth"
-HISTORY_PATH = DATA_DIR / "training_history_p2.json"
+SAVE_PATH    = DATA_DIR / "net_segformer_b2_p2_v2.pth"
+HISTORY_PATH = DATA_DIR / "training_history_p2_v2.json"
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -308,8 +307,14 @@ def main():
     print(f"Loss: {CE_WEIGHT:.0%} weighted CE + {DICE_WEIGHT:.0%} weighted Dice")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="max", factor=0.5, patience=5, min_lr=1e-8
+    warmup = torch.optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=0.1, end_factor=1.0, total_iters=WARMUP_EPOCHS
+    )
+    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=NUM_EPOCHS - WARMUP_EPOCHS, eta_min=1e-8
+    )
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer, schedulers=[warmup, cosine], milestones=[WARMUP_EPOCHS]
     )
     scaler = torch.amp.GradScaler("cuda")
 
@@ -323,7 +328,7 @@ def main():
               + " | ".join(f"{n:>{col_w}}" for n in CLASS_NAMES)
               + " | LR")
     print(f"\n{'='*len(header)}")
-    print(f"  Phase 2: {CE_WEIGHT:.0%} CE + {DICE_WEIGHT:.0%} Dice  |  LR={LR}")
+    print(f"  Phase 2 v2: {CE_WEIGHT:.0%} CE + {DICE_WEIGHT:.0%} Dice  |  Warmup({WARMUP_EPOCHS} ep, {LR*0.1:.0e}->{LR:.0e}) + Cosine -> 1e-8")
     print(f"{'='*len(header)}")
     print(header)
     print(f"{'-'*len(header)}")
@@ -333,7 +338,7 @@ def main():
 
         tr_loss = train_one_epoch(model, train_loader, criterion, optimizer, scaler)
         va_loss, class_ious, miou = validate(model, val_loader, criterion)
-        scheduler.step(miou)
+        scheduler.step()   # CosineAnnealingLR -- bez metriky
 
         lr_now  = optimizer.param_groups[0]["lr"]
         elapsed = time.time() - t0

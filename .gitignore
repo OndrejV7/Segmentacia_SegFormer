@@ -11,6 +11,17 @@ Python_training_resources/verification/
 # ── Matlab labelling data ──
 Matlab_labelling/
 
+# ── Images & large outputs ──
+*.tif
+*.tiff
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.gif
+Python_training_resources/collages/
+Python_training_resources/predictions/
+
 # ── Archives ──
 Archives/
 
@@ -19,6 +30,9 @@ __pycache__/
 *.pyc
 *.pyo
 .ipynb_checkpoints/
+
+# ── Claude Code internal ──
+.claude/
 
 # ── OS ──
 .DS_Store
