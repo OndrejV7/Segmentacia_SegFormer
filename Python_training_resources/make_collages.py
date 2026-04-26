@@ -6,6 +6,7 @@ Each collage (PNG + one page in stacked TIFF):
   Middle : predicted mask (colourised overlay)
   Right  : ground truth mask (colourised overlay)
 
+Loads test images from splits/test_files.json.
 Requires evaluate_test.py to be run first (predictions/ folder must exist).
 
 Usage:
@@ -14,16 +15,15 @@ Usage:
 """
 
 import argparse
+import json
 import numpy as np
 from pathlib import Path
 from PIL import Image, ImageDraw
 
 # ── Config ───────────────────────────────────────────────────────────────
 DATA_DIR    = Path(__file__).parent
-TEST_TRUNK  = "hrce_mixed"
-PRED_DIR    = DATA_DIR / "predictions"
-COLLAGE_DIR = DATA_DIR / "collages"
-TIFF_OUT    = DATA_DIR / "collages_all.tif"
+TEST_SPLIT  = DATA_DIR / "splits" / "test_files.json"
+DEFAULT_TAG = "v3"     # zhoda s evaluate_test.py default modelom
 IMAGE_SIZE  = 512
 OVERLAY_A   = 0.45
 
@@ -86,23 +86,54 @@ def add_header(img_pil: Image.Image, texts: list[str]) -> Image.Image:
 
 
 # ── Main ──────────────────────────────────────────────────────────────────
-def main(max_images: int):
-    img_dir = DATA_DIR / TEST_TRUNK / "images"
-    msk_dir = DATA_DIR / TEST_TRUNK / "masks"
+def load_test_pairs(split_path: Path):
+    """Nacita zoznam (img, msk) tuple z splits/test_files.json."""
+    with open(split_path) as f:
+        data = json.load(f)
+    pairs = []
+    for img_rel, msk_rel in data["pairs"]:
+        pairs.append((DATA_DIR / img_rel, DATA_DIR / msk_rel))
+    return pairs
 
-    img_paths = sorted(img_dir.glob("*.tif"))
+
+def unique_stem(img_path: Path) -> str:
+    """'{trunk}_{stem}' -- musi sediet s evaluate_test.py."""
+    trunk = img_path.parent.parent.name
+    return f"{trunk}_{img_path.stem}"
+
+
+def main(max_images: int, tag: str):
+    if not TEST_SPLIT.exists():
+        print(f"ERROR: {TEST_SPLIT} neexistuje. Spusti 'python make_splits.py'.")
+        return
+
+    pred_dir    = DATA_DIR / f"predictions_{tag}"
+    collage_dir = DATA_DIR / f"collages_{tag}"
+    tiff_out    = DATA_DIR / f"collages_{tag}.tif"
+
+    if not pred_dir.exists():
+        print(f"ERROR: {pred_dir} neexistuje. "
+              f"Spusti najprv 'python evaluate_test.py --model net_segformer_b2_{tag}.pth'.")
+        return
+
+    print(f"Tag         : {tag}")
+    print(f"Predictions : {pred_dir.name}/")
+    print(f"Collages    : {collage_dir.name}/")
+    print(f"TIFF        : {tiff_out.name}")
+
+    pairs = load_test_pairs(TEST_SPLIT)
     if max_images:
-        img_paths = img_paths[:max_images]
+        pairs = pairs[:max_images]
 
-    COLLAGE_DIR.mkdir(exist_ok=True)
+    collage_dir.mkdir(exist_ok=True)
     pages = []
 
-    for img_path in img_paths:
-        msk_path  = msk_dir / (img_path.stem + ".png")
-        pred_path = PRED_DIR / (img_path.stem + ".png")
+    for img_path, msk_path in pairs:
+        stem      = unique_stem(img_path)
+        pred_path = pred_dir / (stem + ".png")
 
         if not msk_path.exists() or not pred_path.exists():
-            print(f"  SKIP {img_path.name}  (missing mask or prediction)")
+            print(f"  SKIP {stem}  (missing mask or prediction)")
             continue
 
         img_np   = np.array(Image.open(img_path))
@@ -131,7 +162,7 @@ def main(max_images: int):
         page.paste(row_pil, (0, 0))
         page.paste(legend,  (0, row_pil.height))
 
-        out_png = COLLAGE_DIR / (img_path.stem + ".png")
+        out_png = collage_dir / (stem + ".png")
         page.save(out_png)
         pages.append(page)
 
@@ -141,14 +172,17 @@ def main(max_images: int):
 
     # Convert to clean images (removes encoder config that causes PIL TIFF errors)
     clean = [Image.fromarray(np.array(p)) for p in pages]
-    clean[0].save(TIFF_OUT, save_all=True, append_images=clean[1:])
+    clean[0].save(tiff_out, save_all=True, append_images=clean[1:])
 
-    print(f"Collages : {COLLAGE_DIR}/  ({len(pages)} PNG files)")
-    print(f"TIFF     : {TIFF_OUT}")
+    print(f"Collages : {collage_dir}/  ({len(pages)} PNG files)")
+    print(f"TIFF     : {tiff_out}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--max", type=int, default=0, help="max images (0 = all)")
+    parser.add_argument("--tag", type=str, default=DEFAULT_TAG,
+                        help="model tag (e.g. 'v3', 'v3_ablation'). "
+                             "Cita predictions_<tag>/, ulozi do collages_<tag>/")
     args = parser.parse_args()
-    main(args.max)
+    main(args.max, args.tag)

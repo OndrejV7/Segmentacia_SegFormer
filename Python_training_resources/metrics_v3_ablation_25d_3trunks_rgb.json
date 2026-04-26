@@ -1,0 +1,93 @@
+{
+  "per_class": {
+    "Drevo": {
+      "iou": 0.983,
+      "dice": 0.9914,
+      "precision": 0.9933,
+      "recall": 0.9896,
+      "f1": 0.9914,
+      "support": 25404538
+    },
+    "Kora": {
+      "iou": 0.7504,
+      "dice": 0.8574,
+      "precision": 0.7661,
+      "recall": 0.9734,
+      "f1": 0.8574,
+      "support": 2187075
+    },
+    "Nezdrava_hrca": {
+      "iou": 0.7635,
+      "dice": 0.8659,
+      "precision": 0.9611,
+      "recall": 0.7878,
+      "f1": 0.8659,
+      "support": 51634
+    },
+    "Okolie": {
+      "iou": 0.9936,
+      "dice": 0.9968,
+      "precision": 0.9999,
+      "recall": 0.9937,
+      "f1": 0.9968,
+      "support": 79587884
+    },
+    "Prasklina": {
+      "iou": 0.4211,
+      "dice": 0.5926,
+      "precision": 0.5528,
+      "recall": 0.6387,
+      "f1": 0.5926,
+      "support": 54227
+    }
+  },
+  "mean_iou": 0.7823,
+  "mean_dice": 0.8608,
+  "mean_precision": 0.8546,
+  "mean_recall": 0.8766,
+  "mean_f1": 0.8608,
+  "pixel_accuracy": 0.992,
+  "total_pixels": 107285358,
+  "confusion_matrix": [
+    [
+      25140922,
+      229538,
+      1642,
+      4414,
+      28022
+    ],
+    [
+      55991,
+      2128847,
+      0,
+      2237,
+      0
+    ],
+    [
+      10957,
+      0,
+      40677,
+      0,
+      0
+    ],
+    [
+      83973,
+      420268,
+      0,
+      79083643,
+      0
+    ],
+    [
+      19452,
+      88,
+      4,
+      48,
+      34635
+    ]
+  ],
+  "model": "net_segformer_b2_v3_ablation_25d.pth",
+  "test_split": "splits/test_3trunks_rgb_files.json",
+  "mode": "2.5D",
+  "depth": 5,
+  "n_images": 186
+}

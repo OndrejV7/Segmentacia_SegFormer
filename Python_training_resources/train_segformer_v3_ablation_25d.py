@@ -1,72 +1,76 @@
 """
-SegFormer-B2  --  Phase 2 Training  [v2: CosineAnnealingLR]
-Loss: 35% Weighted CrossEntropy + 65% Weighted Dice  (refinement)
-LR schedule: CosineAnnealingLR (80 epôch: 3.3e-5 -> 1e-8, bez warmup)
+SegFormer-B2  --  Training v3 ABLATION 2.5D
+============================================
+Identicke s train_segformer_v3_ablation.py okrem:
+  - vstup je STACK 5 KONSEKUTIVNYCH REZOV (2 vlavo + 1 stredny + 2 vpravo)
+    z toho isteho kmena, namiesto opakovaneho 1 rezu v 3 kanaloch
+  - in_channels=5 (smp adaptuje pretrained conv1)
+  - Augmentacia (flip, rotate) sa aplikuje ROVNAKO na vsetkych 5 kanalov
+  - Maska je len pre stredny rez
 
-Loads Phase 1 weights (net_segformer_b2_p1_rnd.pth).
+Cielom je porovnat 2D vs 2.5D pri ablation datasete -- ci priestorovy
+3D kontext susedov pomoze pri detekcii pukliny / hrce.
+
+Vstup ma tvar (B, 5, H, W) pre kazdy batch element.
 
 Outputs:
-  net_segformer_b2_p2_rnd.pth     -- best Phase 2 rnd model weights
-  training_history_p2_rnd.json    -- per-epoch metrics
+  net_segformer_b2_v3_ablation_25d.pth
+  training_history_v3_ablation_25d.json
 """
 
-import random
 import json
+import random
+import time
+from collections import defaultdict
+from pathlib import Path
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
-from pathlib import Path
 from PIL import Image
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import segmentation_models_pytorch as smp
 from tqdm import tqdm
-import time
 
 # ═══════════════════════════════════════════════════════════════════════
 # Configuration
 # ═══════════════════════════════════════════════════════════════════════
-DATA_DIR   = Path(__file__).parent
-IMAGE_SIZE = 512
-BATCH_SIZE = 8
+DATA_DIR    = Path(__file__).parent
+SPLITS_DIR  = DATA_DIR / "splits"
+IMAGE_SIZE  = 512
+BATCH_SIZE  = 8
 NUM_CLASSES = 5
-SEED = 42
+SEED        = 42
 
 CLASS_NAMES = ["Drevo", "Kora", "Nezdrava_hrca", "Okolie", "Prasklina"]
 
-ALL_TRUNKS = [
-    "kmen1", "kmen2", "kmen3", "kmen4", "kmen5",
-    "kmen6", "kmen7", "kmen8", "kmen9", "kmen10",
-    "Dub_1", "Dub_2", "Dub_3b", "Dub_4", "Dub_5",
-    "Dub_6", "Dub_7", "Dub_8", "Dub_9", "Dub_10",
-    "Dub_praskliny_a",
-]
-VAL_TRUNKS   = {"kmen8", "kmen10", "Dub_9"}
-TRAIN_TRUNKS = [t for t in ALL_TRUNKS if t not in VAL_TRUNKS]
+# ── 2.5D parametre ──
+N_NEIGHBORS = 2                   # 2 vlavo + 2 vpravo + 1 stredny = 5 rezov
+DEPTH       = 2 * N_NEIGHBORS + 1 # 5
 
 OVERSAMPLE_PRASKLINA = 6
 OVERSAMPLE_NEZDRAVA  = 3
 
-# Phase 2 config
-NUM_EPOCHS     = 80
-LR             = 3.3e-5 # štart pri overenom optime (bez warmup peaku)
-PATIENCE       = 20
-CE_WEIGHT      = 0.35
-DICE_WEIGHT    = 0.65
+NUM_EPOCHS  = 200
+LR          = 6e-5
+PATIENCE    = 25
+CE_WEIGHT   = 0.30
+DICE_WEIGHT = 0.70
 
-PHASE1_PATH  = DATA_DIR / "net_segformer_b2_p1_rnd.pth"
-SAVE_PATH    = DATA_DIR / "net_segformer_b2_p2_rnd.pth"
-HISTORY_PATH = DATA_DIR / "training_history_p2_rnd.json"
+TRAIN_SPLIT_NAME = "ablation_train"
+VAL_SPLIT_NAME   = "ablation_val"
+SAVE_PATH        = DATA_DIR / "net_segformer_b2_v3_ablation_25d.pth"
+HISTORY_PATH     = DATA_DIR / "training_history_v3_ablation_25d.json"
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 MASK_REMAP = np.array([0, 3, 1, 0, 2, 4], dtype=np.uint8)
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Loss: Weighted Dice + Weighted CE
+# Loss (identicke s v3)
 # ═══════════════════════════════════════════════════════════════════════
 class DiceLoss(nn.Module):
     def __init__(self, weight=None, smooth=1.0):
@@ -78,12 +82,10 @@ class DiceLoss(nn.Module):
         C = inputs.size(1)
         probas     = F.softmax(inputs, dim=1)
         targets_oh = F.one_hot(targets, C).permute(0, 3, 1, 2).float()
-
         dims = (0, 2, 3)
         inter = (probas * targets_oh).sum(dims)
         card  = probas.sum(dims) + targets_oh.sum(dims)
         dice  = (2.0 * inter + self.smooth) / (card + self.smooth)
-
         if self.weight is not None:
             dice = dice * self.weight
             return 1.0 - dice.sum() / self.weight.sum()
@@ -91,49 +93,100 @@ class DiceLoss(nn.Module):
 
 
 class DiceCELoss(nn.Module):
-    def __init__(self, alpha=None, ce_w=0.4, dice_w=0.6):
+    def __init__(self, alpha=None, ce_w=0.30, dice_w=0.70):
         super().__init__()
-        self.ce      = nn.CrossEntropyLoss(weight=alpha)
-        self.dice    = DiceLoss(weight=alpha)
-        self.ce_w    = ce_w
-        self.dice_w  = dice_w
+        self.ce     = nn.CrossEntropyLoss(weight=alpha)
+        self.dice   = DiceLoss(weight=alpha)
+        self.ce_w   = ce_w
+        self.dice_w = dice_w
 
     def forward(self, inputs, targets):
-        return self.ce_w * self.ce(inputs, targets) + self.dice_w * self.dice(inputs, targets)
+        return self.ce_w * self.ce(inputs, targets) + \
+               self.dice_w * self.dice(inputs, targets)
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Dataset (identical to Phase 1)
+# Helpers
 # ═══════════════════════════════════════════════════════════════════════
-def collect_pairs(trunks):
+def seed_everything(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
+
+
+def load_split(name):
+    path = SPLITS_DIR / f"{name}_files.json"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Split file {path} neexistuje. "
+            f"Spusti najprv 'python make_splits_ablation.py'."
+        )
+    with open(path) as f:
+        data = json.load(f)
     imgs, msks = [], []
-    for trunk in trunks:
-        img_dir = DATA_DIR / trunk / "images"
-        msk_dir = DATA_DIR / trunk / "masks"
-        for img_path in sorted(img_dir.glob("*.tif")):
-            msk_path = msk_dir / (img_path.stem + ".png")
-            if msk_path.exists():
-                imgs.append(img_path)
-                msks.append(msk_path)
+    for img_rel, msk_rel in data["pairs"]:
+        imgs.append(DATA_DIR / img_rel)
+        msks.append(DATA_DIR / msk_rel)
     return imgs, msks
 
 
-class WoodLogDataset(Dataset):
-    def __init__(self, image_paths, mask_paths, transform=None):
+# ═══════════════════════════════════════════════════════════════════════
+# 2.5D Dataset
+# ═══════════════════════════════════════════════════════════════════════
+class WoodLogDataset25D(Dataset):
+    """
+    Dataset ktory pre kazdy split image:
+    - Najde kmen, do ktoreho patri (parent.parent.name)
+    - Najde jeho poziciu v rade rezov toho kmena
+    - Vytvori stack 2*N+1 rezov (so zarovnanim na okraje cez clamp)
+    - Vrati (multi_channel_image, mask_pre_stredny_rez)
+
+    Trunk_data obsahuje VSETKY rezy zo vsetkych referencovanych kmenov,
+    aj tie co su v inom splite -- pouzivaju sa LEN ako vstupny kontext,
+    nie ako supervízia, takze nie je leakage.
+    """
+    def __init__(self, image_paths, mask_paths, n_neighbors=N_NEIGHBORS,
+                 transform=None):
         self.image_paths = image_paths
         self.mask_paths  = mask_paths
+        self.n_neighbors = n_neighbors
         self.transform   = transform
 
-        print(f"  Pre-loading {len(image_paths)} images into RAM...", end=" ", flush=True)
-        self.images        = []
+        # ── Identify trunks ──
+        trunks = sorted(set(p.parent.parent.name for p in image_paths))
+
+        # ── Pre-load ALL slices from these trunks ──
+        print(f"  Pre-loading slices from {len(trunks)} trunks (pre 2.5D kontext)...",
+              end=" ", flush=True)
+        # trunk -> ordered list of (stem, np.uint8 image)
+        self.trunk_data = {}
+        # (trunk, stem) -> index in trunk_data[trunk]
+        self.trunk_index = {}
+        total_loaded = 0
+        for trunk in trunks:
+            img_dir = DATA_DIR / trunk / "images"
+            slices = []
+            for img_path in sorted(img_dir.glob("*.tif")):
+                stem = img_path.stem
+                img = np.array(Image.open(img_path))
+                # zachovavame uint8 format
+                slices.append((stem, img))
+            self.trunk_data[trunk] = slices
+            for i, (stem, _) in enumerate(slices):
+                self.trunk_index[(trunk, stem)] = i
+            total_loaded += len(slices)
+        print(f"{total_loaded} rezov nacitanych.")
+
+        # ── Pre-load masks for SPLIT images (one per __getitem__) ──
+        print(f"  Pre-loading {len(image_paths)} masiek...", end=" ", flush=True)
         self.masks_raw     = []
         self.has_prasklina = []
         self.has_nezdrava  = []
-
-        for ip, mp in zip(image_paths, mask_paths):
-            img = np.array(Image.open(ip))
+        for mp in mask_paths:
             msk = np.array(Image.open(mp))
-            self.images.append(img)
             self.masks_raw.append(msk)
             self.has_prasklina.append(5 in msk)
             self.has_nezdrava.append(4 in msk)
@@ -143,20 +196,34 @@ class WoodLogDataset(Dataset):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
-        img = self.images[idx].copy()
-        msk = self.masks_raw[idx].copy()
+        img_path = self.image_paths[idx]
+        trunk = img_path.parent.parent.name
+        stem  = img_path.stem
+        center_idx = self.trunk_index[(trunk, stem)]
+        slices_list = self.trunk_data[trunk]
+        n_slices = len(slices_list)
 
-        if img.ndim == 2:
-            img = np.stack([img, img, img], axis=-1)
+        # Build 2.5D stack with edge clamping
+        stack = []
+        for offset in range(-self.n_neighbors, self.n_neighbors + 1):
+            i = max(0, min(n_slices - 1, center_idx + offset))
+            slice_img = slices_list[i][1]
+            # Ensure 2D grayscale (CT su grayscale, ale pre istotu)
+            if slice_img.ndim == 3:
+                slice_img = slice_img[..., 0]
+            stack.append(slice_img.copy())
 
-        msk = MASK_REMAP[msk]
+        # Stack as channels: shape (H, W, DEPTH)
+        multi = np.stack(stack, axis=-1).astype(np.float32) / 255.0  # 0-1 range
+
+        msk = MASK_REMAP[self.masks_raw[idx]]
 
         if self.transform:
-            out = self.transform(image=img, mask=msk)
-            img = out["image"]
-            msk = out["mask"]
+            out = self.transform(image=multi, mask=msk)
+            multi = out["image"]
+            msk   = out["mask"]
 
-        return img.float(), msk.long()
+        return multi.float(), msk.long()
 
 
 def get_train_transform():
@@ -165,7 +232,9 @@ def get_train_transform():
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
         A.Rotate(limit=180, border_mode=0, fill=0, fill_mask=3, p=1.0),
-        A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        # Normalize na vsetkych DEPTH kanaloch -- ImageNet stats opakovane
+        # (CT data su grayscale, takze stredny mean ~0.45 je rozumny default)
+        A.Normalize(mean=[0.485]*DEPTH, std=[0.229]*DEPTH, max_pixel_value=1.0),
         ToTensorV2(),
     ])
 
@@ -173,13 +242,13 @@ def get_train_transform():
 def get_val_transform():
     return A.Compose([
         A.Resize(IMAGE_SIZE, IMAGE_SIZE),
-        A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        A.Normalize(mean=[0.485]*DEPTH, std=[0.229]*DEPTH, max_pixel_value=1.0),
         ToTensorV2(),
     ])
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Metrics
+# Metrics / loops
 # ═══════════════════════════════════════════════════════════════════════
 def compute_iou(preds, targets, num_classes):
     ious = []
@@ -190,9 +259,6 @@ def compute_iou(preds, targets, num_classes):
     return ious
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Train / Val loops
-# ═══════════════════════════════════════════════════════════════════════
 def train_one_epoch(model, loader, criterion, optimizer, scaler):
     model.train()
     total_loss = 0.0
@@ -200,8 +266,7 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler):
         imgs = imgs.to(DEVICE, non_blocking=True)
         msks = msks.to(DEVICE, non_blocking=True)
         with torch.amp.autocast("cuda"):
-            out  = model(imgs)
-            loss = criterion(out, msks)
+            loss = criterion(model(imgs), msks)
         optimizer.zero_grad()
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
@@ -239,41 +304,34 @@ def main():
     seed_everything(SEED)
 
     print(f"PyTorch : {torch.__version__}")
-    print(f"CUDA    : {torch.cuda.is_available()} -- {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A'}")
+    print(f"CUDA    : {torch.cuda.is_available()} -- "
+          f"{torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A'}")
     print(f"Device  : {DEVICE}")
+    print(f"Splits  : ablation (bez Dub_praskliny_a a hrce_mixed)")
+    print(f"Loss    : {CE_WEIGHT:.0%} CE + {DICE_WEIGHT:.0%} Dice")
+    print(f"Epochs  : {NUM_EPOCHS}, patience={PATIENCE}")
+    print(f"Mode    : 2.5D, n_neighbors={N_NEIGHBORS}, depth={DEPTH}")
 
-    if not PHASE1_PATH.exists():
-        print(f"\nERROR: Phase 1 weights not found at {PHASE1_PATH}")
-        print("Run train_segformer_phase1.py first.")
-        return
+    train_imgs, train_msks = load_split(TRAIN_SPLIT_NAME)
+    val_imgs,   val_msks   = load_split(VAL_SPLIT_NAME)
+    print(f"Train: {len(train_imgs)}  |  Val: {len(val_imgs)}")
 
-    # ── Data ──
-    train_imgs, train_msks = collect_pairs(TRAIN_TRUNKS)
-    val_imgs,   val_msks   = collect_pairs(list(VAL_TRUNKS))
-
-    print(f"\nTrain: {len(train_imgs)} images  |  Val: {len(val_imgs)} images")
-
-    train_ds = WoodLogDataset(train_imgs, train_msks, get_train_transform())
-    val_ds   = WoodLogDataset(val_imgs,   val_msks,   get_val_transform())
+    train_ds = WoodLogDataset25D(train_imgs, train_msks, transform=get_train_transform())
+    val_ds   = WoodLogDataset25D(val_imgs,   val_msks,   transform=get_val_transform())
 
     weights = []
     for i in range(len(train_ds)):
-        if train_ds.has_prasklina[i]:
-            weights.append(OVERSAMPLE_PRASKLINA)
-        elif train_ds.has_nezdrava[i]:
-            weights.append(OVERSAMPLE_NEZDRAVA)
-        else:
-            weights.append(1.0)
+        if train_ds.has_prasklina[i]:   weights.append(OVERSAMPLE_PRASKLINA)
+        elif train_ds.has_nezdrava[i]:  weights.append(OVERSAMPLE_NEZDRAVA)
+        else:                           weights.append(1.0)
 
     sampler = WeightedRandomSampler(weights, num_samples=len(train_ds), replacement=True)
-
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler,
                               num_workers=0, pin_memory=True, drop_last=True)
     val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False,
                               num_workers=0, pin_memory=True)
 
-    # ── Class weights ──
-    print("\nComputing class pixel frequencies on training set...")
+    print("\nComputing class pixel frequencies (ablation 2.5D train only)...")
     pixel_counts = np.zeros(NUM_CLASSES, dtype=np.int64)
     for msk_raw in train_ds.masks_raw:
         msk_py = MASK_REMAP[msk_raw]
@@ -289,29 +347,21 @@ def main():
     for i, name in enumerate(CLASS_NAMES):
         print(f"  {name:<16} {freq[i]*100:>7.3f}% {alpha[i].item():>8.2f}")
 
-    # ── Model: load Phase 1 weights ──
+    # ── Model: in_channels=DEPTH ──
     model = smp.create_model(
-        arch="segformer",
-        encoder_name="mit_b2",
-        encoder_weights=None,
-        in_channels=3,
-        classes=NUM_CLASSES,
+        arch="segformer", encoder_name="mit_b2",
+        encoder_weights="imagenet", in_channels=DEPTH, classes=NUM_CLASSES,
     ).to(DEVICE)
-
-    model.load_state_dict(torch.load(PHASE1_PATH, map_location=DEVICE, weights_only=True))
-    print(f"\nLoaded Phase 1 weights from {PHASE1_PATH}")
-    print(f"Model: SegFormer-B2, {sum(p.numel() for p in model.parameters())/1e6:.1f}M params")
+    print(f"\nModel: SegFormer-B2 (in_channels={DEPTH}), "
+          f"{sum(p.numel() for p in model.parameters())/1e6:.1f}M params")
 
     criterion = DiceCELoss(alpha=alpha, ce_w=CE_WEIGHT, dice_w=DICE_WEIGHT)
-    print(f"Loss: {CE_WEIGHT:.0%} weighted CE + {DICE_WEIGHT:.0%} weighted Dice")
-
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=NUM_EPOCHS, eta_min=1e-8
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="max", factor=0.5, patience=5, min_lr=1e-7
     )
     scaler = torch.amp.GradScaler("cuda")
 
-    # ── Training loop ──
     best_miou   = 0.0
     pat_counter = 0
     history     = []
@@ -321,17 +371,16 @@ def main():
               + " | ".join(f"{n:>{col_w}}" for n in CLASS_NAMES)
               + " | LR")
     print(f"\n{'='*len(header)}")
-    print(f"  Phase 2 rnd: {CE_WEIGHT:.0%} CE + {DICE_WEIGHT:.0%} Dice  |  Cosine {LR:.1e} -> 1e-8  ({NUM_EPOCHS} ep)  |  base: p1_rnd")
+    print(f"  v3 ABLATION 2.5D: depth={DEPTH}, {CE_WEIGHT:.0%} CE + {DICE_WEIGHT:.0%} Dice")
     print(f"{'='*len(header)}")
     print(header)
     print(f"{'-'*len(header)}")
 
     for epoch in range(1, NUM_EPOCHS + 1):
         t0 = time.time()
-
         tr_loss = train_one_epoch(model, train_loader, criterion, optimizer, scaler)
         va_loss, class_ious, miou = validate(model, val_loader, criterion)
-        scheduler.step()   # CosineAnnealingLR -- bez metriky
+        scheduler.step(miou)
 
         lr_now  = optimizer.param_groups[0]["lr"]
         elapsed = time.time() - t0
@@ -342,8 +391,15 @@ def main():
         }
         history.append(record)
         with open(HISTORY_PATH, "w") as f:
-            json.dump({"class_names": CLASS_NAMES, "val_trunks": sorted(VAL_TRUNKS),
-                       "train_trunks": TRAIN_TRUNKS, "history": history}, f, indent=2)
+            json.dump({
+                "class_names": CLASS_NAMES,
+                "split_source": "splits/ablation_{train,val}_files.json",
+                "mode": "2.5D",
+                "n_neighbors": N_NEIGHBORS,
+                "depth": DEPTH,
+                "loss": f"{CE_WEIGHT} CE + {DICE_WEIGHT} Dice",
+                "history": history,
+            }, f, indent=2)
 
         iou_str = " | ".join(f"{v*100:>{col_w}.1f}%" for v in class_ious)
         tag = " << best" if miou > best_miou else ""
@@ -361,18 +417,9 @@ def main():
             print(f"\nEarly stopping at epoch {epoch} (patience={PATIENCE})")
             break
 
-    print(f"\nPhase 2 done. Best mIoU: {best_miou*100:.2f}%")
+    print(f"\nv3 ablation 2.5D done. Best mIoU: {best_miou*100:.2f}%")
     print(f"Weights : {SAVE_PATH}")
     print(f"History : {HISTORY_PATH}")
-
-
-def seed_everything(seed):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = False
-    torch.backends.cudnn.benchmark = True
 
 
 if __name__ == "__main__":

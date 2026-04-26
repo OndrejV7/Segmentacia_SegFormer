@@ -1,16 +1,15 @@
 """
-Test set evaluation -- nacita test set z splits/test_files.json.
+Validation set evaluation (Dub_9, kmen10, kmen8).
 
-Runs inference with the best trained model, computes full per-class metrics
-from a confusion matrix and saves:
-  predictions/          -- predicted masks as PNG (class IDs 0-4)
-  metrics.json          -- full metrics dict
-  metrics.csv           -- per-class table
+Mirrors evaluate_test.py — runs inference with the best trained model,
+computes full per-class metrics from a confusion matrix and saves:
+  predictions_val/     -- predicted masks as PNG (class IDs 0-4)
+  metrics_val.json     -- full metrics dict
+  metrics_val.csv      -- per-class table
 
 Usage:
-    python evaluate_test.py
-    python evaluate_test.py --model net_segformer_b2_v3.pth
-    python evaluate_test.py --model net_segformer_b2_v3.pth --test-split splits/test_files.json
+    python evaluate_val.py
+    python evaluate_val.py --model net_segformer_b2_p2_v2.pth
 """
 
 import argparse
@@ -28,7 +27,7 @@ from tqdm import tqdm
 
 # ── Config ───────────────────────────────────────────────────────────────
 DATA_DIR    = Path(__file__).parent
-TEST_SPLIT  = DATA_DIR / "splits" / "test_files.json"
+VAL_TRUNKS  = ["Dub_9", "kmen10", "kmen8"]
 IMAGE_SIZE  = 512
 NUM_CLASSES = 5
 BATCH_SIZE  = 8
@@ -36,17 +35,10 @@ BATCH_SIZE  = 8
 CLASS_NAMES = ["Drevo", "Kora", "Nezdrava_hrca", "Okolie", "Prasklina"]
 MASK_REMAP  = np.array([0, 3, 1, 0, 2, 4], dtype=np.uint8)
 
-DEFAULT_MODEL = DATA_DIR / "net_segformer_b2_v3.pth"
-# Vystupy zavisia od modelu + voliteľneho suffixu (napr. test split tag),
-# aby sa nepreplsali pri behu na inom modeli alebo testu.
-# Napr. net_segformer_b2_v3.pth + suffix='_3trunks' -> predictions_v3_3trunks/
-def output_paths(model_path: Path, suffix: str = ""):
-    stem = model_path.stem.replace("net_segformer_b2_", "") + suffix
-    return (
-        DATA_DIR / f"predictions_{stem}",
-        DATA_DIR / f"metrics_{stem}.json",
-        DATA_DIR / f"metrics_{stem}.csv",
-    )
+DEFAULT_MODEL = DATA_DIR / "net_segformer_b2_p2_v2.pth"
+PRED_DIR      = DATA_DIR / "predictions_val"
+METRICS_JSON  = DATA_DIR / "metrics_val.json"
+METRICS_CSV   = DATA_DIR / "metrics_val.csv"
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -60,51 +52,34 @@ def get_transform():
     ])
 
 
-def load_test_split(split_path: Path):
-    """Nacita test split JSON, vrati zoznam absolutnych ciest (img, msk)."""
-    if not split_path.exists():
-        raise FileNotFoundError(
-            f"Test split {split_path} neexistuje. Spusti 'python make_splits.py'."
-        )
-    with open(split_path) as f:
-        data = json.load(f)
+def collect_pairs(trunk):
+    img_dir = DATA_DIR / trunk / "images"
+    msk_dir = DATA_DIR / trunk / "masks"
     imgs, msks = [], []
-    for img_rel, msk_rel in data["pairs"]:
-        imgs.append(DATA_DIR / img_rel)
-        msks.append(DATA_DIR / msk_rel)
+    for img_path in sorted(img_dir.glob("*.tif")):
+        msk_path = msk_dir / (img_path.stem + ".png")
+        if msk_path.exists():
+            imgs.append(img_path)
+            msks.append(msk_path)
     return imgs, msks
 
 
-def unique_stem(img_path: Path) -> str:
-    """
-    Vytvori unikatny key z ciesty -- '{trunk}_{stem}'. Test set obsahuje
-    snimky z 5 roznych trunkov a viacere maju rovnake mena (001.tif),
-    takze samotny stem nestaci.
-    """
-    # struktura: <trunk>/images/<stem>.tif
-    trunk = img_path.parent.parent.name
-    return f"{trunk}_{img_path.stem}"
-
-
 def metrics_from_cm(cm):
-    """Derive per-class and aggregate metrics from a confusion matrix."""
     C = cm.shape[0]
     results = {}
-
     ious, dices, precisions, recalls, f1s = [], [], [], [], []
     per_class = {}
 
     for c in range(C):
         tp = cm[c, c]
-        fp = cm[:, c].sum() - tp      # predicted c, actually other
-        fn = cm[c, :].sum() - tp      # actually c, predicted other
-        tn = cm.sum() - tp - fp - fn
+        fp = cm[:, c].sum() - tp
+        fn = cm[c, :].sum() - tp
 
         iou       = tp / (tp + fp + fn) if (tp + fp + fn) > 0 else float("nan")
         dice      = 2*tp / (2*tp + fp + fn) if (2*tp + fp + fn) > 0 else float("nan")
         precision = tp / (tp + fp) if (tp + fp) > 0 else float("nan")
         recall    = tp / (tp + fn) if (tp + fn) > 0 else float("nan")
-        f1        = dice   # F1 == Dice for binary per-class
+        f1        = dice
 
         per_class[CLASS_NAMES[c]] = {
             "iou":       round(float(iou), 4),
@@ -112,7 +87,7 @@ def metrics_from_cm(cm):
             "precision": round(float(precision), 4),
             "recall":    round(float(recall), 4),
             "f1":        round(float(f1), 4),
-            "support":   int(cm[c, :].sum()),   # GT pixels of this class
+            "support":   int(cm[c, :].sum()),
         }
         ious.append(iou);  dices.append(dice)
         precisions.append(precision);  recalls.append(recall);  f1s.append(f1)
@@ -133,22 +108,25 @@ def metrics_from_cm(cm):
 
 
 # ── Main ──────────────────────────────────────────────────────────────────
-def main(model_path: Path, test_split: Path, output_suffix: str = ""):
-    pred_dir, metrics_json, metrics_csv = output_paths(model_path, output_suffix)
+def main(model_path: Path):
+    print(f"Model  : {model_path.name}")
+    print(f"Device : {DEVICE}")
+    print(f"Val    : {VAL_TRUNKS}")
 
-    print(f"Model      : {model_path.name}")
-    print(f"Device     : {DEVICE}")
-    print(f"Test split : {test_split.relative_to(DATA_DIR)}")
-    print(f"Outputs    : {pred_dir.name}/, {metrics_json.name}, {metrics_csv.name}")
+    all_imgs, all_msks = [], []
+    for trunk in VAL_TRUNKS:
+        imgs, msks = collect_pairs(trunk)
+        print(f"  {trunk}: {len(imgs)} images")
+        all_imgs.extend(imgs)
+        all_msks.extend(msks)
 
-    img_paths, msk_paths = load_test_split(test_split)
-    print(f"Images     : {len(img_paths)}\n")
+    print(f"Total  : {len(all_imgs)} images\n")
 
-    if not img_paths:
-        print(f"ERROR: no image/mask pairs found in {test_split}")
+    if not all_imgs:
+        print("ERROR: no image/mask pairs found in validation trunks")
         return
 
-    pred_dir.mkdir(exist_ok=True)
+    PRED_DIR.mkdir(exist_ok=True)
 
     # ── Load model ──
     model = smp.create_model(
@@ -161,7 +139,7 @@ def main(model_path: Path, test_split: Path, output_suffix: str = ""):
     transform = get_transform()
     cm = np.zeros((NUM_CLASSES, NUM_CLASSES), dtype=np.int64)
 
-    for img_path, msk_path in tqdm(zip(img_paths, msk_paths), total=len(img_paths), desc="Inference"):
+    for img_path, msk_path in tqdm(zip(all_imgs, all_msks), total=len(all_imgs), desc="Inference"):
         img_np  = np.array(Image.open(img_path))
         msk_raw = np.array(Image.open(msk_path))
 
@@ -179,14 +157,11 @@ def main(model_path: Path, test_split: Path, output_suffix: str = ""):
             with torch.amp.autocast("cuda"):
                 logits = model(tensor)
 
-        # Upsample back to original resolution for metric computation
         logits_up = F.interpolate(logits, size=(orig_h, orig_w), mode="bilinear", align_corners=False)
         pred = logits_up.argmax(dim=1).squeeze(0).cpu().numpy().astype(np.uint8)
 
-        # Save prediction (unique stem -- viacere trunky mozu mat rovnake mena)
-        Image.fromarray(pred).save(pred_dir / (unique_stem(img_path) + ".png"))
+        Image.fromarray(pred).save(PRED_DIR / (img_path.stem + ".png"))
 
-        # Accumulate confusion matrix
         mask_flat = msk_gt.ravel() if msk_gt.shape == pred.shape else \
             np.array(Image.fromarray(msk_gt).resize((orig_w, orig_h), Image.NEAREST)).ravel()
         pred_flat = pred.ravel()
@@ -195,14 +170,14 @@ def main(model_path: Path, test_split: Path, output_suffix: str = ""):
     # ── Metrics ──
     results = metrics_from_cm(cm)
     results["model"]      = model_path.name
-    results["test_split"] = str(test_split.relative_to(DATA_DIR).as_posix())
-    results["n_images"]   = len(img_paths)
+    results["val_trunks"] = VAL_TRUNKS
+    results["n_images"]   = len(all_imgs)
 
-    with open(metrics_json, "w") as f:
+    with open(METRICS_JSON, "w") as f:
         json.dump(results, f, indent=2)
 
     # ── CSV ──
-    with open(metrics_csv, "w", newline="", encoding="utf-8") as f:
+    with open(METRICS_CSV, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["Class", "IoU", "Dice/F1", "Precision", "Recall", "Support (px)"])
         for name in CLASS_NAMES:
@@ -233,16 +208,13 @@ def main(model_path: Path, test_split: Path, output_suffix: str = ""):
           f" {results['mean_recall']*100:>6.1f}%")
     print(f"  Pixel accuracy: {results['pixel_accuracy']*100:.2f}%")
     print(f"{'='*64}")
-    print(f"\nSaved: {metrics_json}")
-    print(f"Saved: {metrics_csv}")
-    print(f"Saved: {pred_dir}/  ({len(img_paths)} prediction masks)")
+    print(f"\nSaved: {METRICS_JSON}")
+    print(f"Saved: {METRICS_CSV}")
+    print(f"Saved: {PRED_DIR}/  ({len(all_imgs)} prediction masks)")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model",         type=Path, default=DEFAULT_MODEL)
-    parser.add_argument("--test-split",    type=Path, default=TEST_SPLIT)
-    parser.add_argument("--output-suffix", type=str,  default="",
-                        help="Pripony k vystupnym subovrom (napr. '_3trunks')")
+    parser.add_argument("--model", type=Path, default=DEFAULT_MODEL)
     args = parser.parse_args()
-    main(args.model, args.test_split, args.output_suffix)
+    main(args.model)

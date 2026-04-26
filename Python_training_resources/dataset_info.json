@@ -38,10 +38,11 @@
     {"name": "Dub_8",    "type": "dub",  "num_pairs": 64,  "notes": ""},
     {"name": "Dub_9",    "type": "dub",  "num_pairs": 64,  "notes": ""},
     {"name": "Dub_10",   "type": "dub",  "num_pairs": 64,  "notes": ""},
-    {"name": "hrce_mixed","type": "mixed","num_pairs": 94,  "notes": "Mixed oak dataset. Two images (098.tif, 099.tif) had no annotation and were excluded. Original source had 96 images."}
+    {"name": "hrce_mixed","type": "mixed","num_pairs": 94,  "notes": "Mixed oak dataset. Two images (098.tif, 099.tif) had no annotation and were excluded. Original source had 96 images."},
+    {"name": "Dub_praskliny_a","type": "dub","num_pairs": 50, "notes": "Hand-picked oak scans from '100 ks Dub praskliny_a' source, annotated specifically for crack detection. Prasklina present in all 50 images (vs ~3.5% in the rest of the dataset). Added 2026-04-25 from gTruth_praskliny_1a.mat."}
   ],
-  "total_pairs": 1441,
+  "total_pairs": 1491,
   "kmen_series_total": 704,
-  "dub_series_total": 643,
+  "dub_series_total": 693,
   "mixed_total": 94
 }

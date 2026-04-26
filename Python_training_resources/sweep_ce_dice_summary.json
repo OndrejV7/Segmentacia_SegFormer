@@ -1,0 +1,96 @@
+{
+  "class_names": [
+    "Drevo",
+    "Kora",
+    "Nezdrava_hrca",
+    "Okolie",
+    "Prasklina"
+  ],
+  "results": [
+    {
+      "ce_weight": 0.25,
+      "dice_weight": 0.75,
+      "best_miou": 0.7401925592870875,
+      "best_epoch": 76,
+      "best_class_ious": [
+        0.9782229075636818,
+        0.7496579935280057,
+        0.6430784107482628,
+        0.9955168389034019,
+        0.3344866456920852
+      ],
+      "total_epochs": 96,
+      "elapsed_min": 53.30786618789037,
+      "weights_file": "net_segformer_b2_sweep_ce25_dice75.pth",
+      "history_file": "training_history_sweep_ce25_dice75.json"
+    },
+    {
+      "ce_weight": 0.3,
+      "dice_weight": 0.7,
+      "best_miou": 0.7518845939120644,
+      "best_epoch": 98,
+      "best_class_ious": [
+        0.980146640735384,
+        0.7647428465137911,
+        0.6549163869226525,
+        0.9956353760959085,
+        0.363981719292586
+      ],
+      "total_epochs": 100,
+      "elapsed_min": 56.29661982854207,
+      "weights_file": "net_segformer_b2_sweep_ce30_dice70.pth",
+      "history_file": "training_history_sweep_ce30_dice70.json"
+    },
+    {
+      "ce_weight": 0.35,
+      "dice_weight": 0.65,
+      "best_miou": 0.7404690583521648,
+      "best_epoch": 46,
+      "best_class_ious": [
+        0.9785949235559043,
+        0.748031687354175,
+        0.6568639764468808,
+        0.9954374495432804,
+        0.3234172548605838
+      ],
+      "total_epochs": 66,
+      "elapsed_min": 36.814179531733195,
+      "weights_file": "net_segformer_b2_sweep_ce35_dice65.pth",
+      "history_file": "training_history_sweep_ce35_dice65.json"
+    },
+    {
+      "ce_weight": 0.4,
+      "dice_weight": 0.6,
+      "best_miou": 0.7438653167727447,
+      "best_epoch": 96,
+      "best_class_ious": [
+        0.9800409038096288,
+        0.7587980424968584,
+        0.6481303849831352,
+        0.9955123578213714,
+        0.3368448947527297
+      ],
+      "total_epochs": 100,
+      "elapsed_min": 58.50608240365982,
+      "weights_file": "net_segformer_b2_sweep_ce40_dice60.pth",
+      "history_file": "training_history_sweep_ce40_dice60.json"
+    },
+    {
+      "ce_weight": 0.45,
+      "dice_weight": 0.55,
+      "best_miou": 0.7377946334545247,
+      "best_epoch": 57,
+      "best_class_ious": [
+        0.9792370687010385,
+        0.7480958857261455,
+        0.6542718542596648,
+        0.9951938973122184,
+        0.3121744612735558
+      ],
+      "total_epochs": 77,
+      "elapsed_min": 43.9111624956131,
+      "weights_file": "net_segformer_b2_sweep_ce45_dice55.pth",
+      "history_file": "training_history_sweep_ce45_dice55.json"
+    }
+  ]
+}

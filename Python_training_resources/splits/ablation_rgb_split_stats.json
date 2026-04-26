@@ -1,0 +1,69 @@
+{
+  "class_names": [
+    "Drevo",
+    "Kora",
+    "Nezdrava_hrca",
+    "Okolie",
+    "Prasklina"
+  ],
+  "ablation_trunks": [
+    "kmen1",
+    "kmen2",
+    "kmen3",
+    "kmen4",
+    "kmen5",
+    "kmen6",
+    "kmen7",
+    "kmen8",
+    "kmen9",
+    "kmen10",
+    "Dub_1",
+    "Dub_2",
+    "Dub_3b",
+    "Dub_4",
+    "Dub_5",
+    "Dub_6",
+    "Dub_7",
+    "Dub_8",
+    "Dub_9",
+    "Dub_10"
+  ],
+  "test_full_trunks": [
+    "kmen4",
+    "kmen9",
+    "Dub_3b"
+  ],
+  "edges_dropped": true,
+  "val_ratio": 0.2,
+  "split_seed": 0,
+  "n_train": 897,
+  "n_val": 224,
+  "train_pixels": [
+    93930623,
+    9957581,
+    227704,
+    438776040,
+    47800
+  ],
+  "val_pixels": [
+    24327137,
+    2686862,
+    47446,
+    108508147,
+    14024
+  ],
+  "train_imgs_per_class": [
+    897,
+    820,
+    315,
+    897,
+    595
+  ],
+  "val_imgs_per_class": [
+    224,
+    204,
+    69,
+    224,
+    154
+  ]
+}
