@@ -1,27 +1,28 @@
 """
-Definuje train / val / test split pre dataset SegFormer-B2.
+make_splits_v4 -- Definuje train / val / test split pre rozsireny dataset
+(s pridanym Dub_praskliny_b, total 1541 snimok).
 
-Test set (fixny, trunk-level):
+Test set (fixny, trunk-level, IDENTICKY s v3 pre fer porovnanie):
     - kmen4    (cely)            64 snimok
     - kmen9    (cely)            64 snimok
     - Dub_3b   (cely)            64 snimok
     - hrce_mixed[:15]            15 snimok (prvych 15 podla mena)
     - Dub_praskliny_a[:15]       15 snimok (prvych 15 podla mena)
     -------------------------------------
-    SPOLU                        222 snimok (cca 16% datasetu)
+    SPOLU                        222 snimok (cca 14,4% datasetu)
 
 Train + Val:
-    Zvysok (1175 snimok) sa nahodne rozdeli 80/20 -- bez ohladu na trunk
-    (within-trunk leakage je akceptovatelny, lebo TEST je trunk-level OK).
+    Zvysok (1319 snimok = 1175 z v3 + 50 Dub_praskliny_b + 94 hrce_mixed
+    okrem 15) sa nahodne rozdeli 80/20. Pool je o 50 vacsi nez v3.
 
 Vystupy (JSON s relativnymi cestami od DATA_DIR):
-    splits/test_files.json
-    splits/train_files.json
-    splits/val_files.json
-    splits/split_stats.json
+    splits/test_v4_files.json    (= test_v3 obsahom, ulozene s v4 menom)
+    splits/train_v4_files.json
+    splits/val_v4_files.json
+    splits/split_stats_v4.json
 
 Spustenie:
-    python make_splits.py
+    python make_splits_v4.py
 """
 import json
 import numpy as np
@@ -40,7 +41,7 @@ ALL_TRUNKS = [
     "kmen6", "kmen7", "kmen8", "kmen9", "kmen10",
     "Dub_1", "Dub_2", "Dub_3b", "Dub_4", "Dub_5",
     "Dub_6", "Dub_7", "Dub_8", "Dub_9", "Dub_10",
-    "Dub_praskliny_a", "hrce_mixed",
+    "Dub_praskliny_a", "Dub_praskliny_b", "hrce_mixed",
 ]
 
 # ── Test set definicia ─────────────────────────────────────────
@@ -90,7 +91,7 @@ def class_stats(msk_paths_rel):
 def print_stats(label, pairs, total_n=None):
     px, n_per_cls = class_stats(pairs)
     total_px = px.sum()
-    print(f"\n── {label}  (n={len(pairs)}"
+    print(f"\n-- {label}  (n={len(pairs)}"
           + (f", {len(pairs)/total_n*100:.1f}% datasetu)" if total_n else ")"))
     print(f"  {'Trieda':<18} {'Pixely':>14} {'%':>8} {'#snimok':>10}")
     print(f"  {'-'*52}")
@@ -156,7 +157,7 @@ def main():
     px_val,   n_val_  = print_stats("VAL",   val_rel,   total_n)
     px_all = px_test + px_train + px_val
 
-    print("\n── Pomer (test % / dataset %) ──")
+    print("\n-- Pomer (test % / dataset %) --")
     print(f"  {'Trieda':<18} {'Test%':>8} {'Train%':>8} {'Val%':>8} {'Pomer test':>12}")
     for c, name in enumerate(CLASS_NAMES):
         ds_pct = px_all[c] / px_all.sum() * 100
@@ -167,17 +168,17 @@ def main():
         flag   = " (!)" if (ratio < 0.5 or ratio > 2.0) else ""
         print(f"  {name:<18} {t_pct:>7.3f}% {tr_pct:>7.3f}% {v_pct:>7.3f}% {ratio:>10.2f}x{flag}")
 
-    # ── 7) Ulozenie ──
-    with open(SPLITS_DIR / "test_files.json", "w") as f:
-        json.dump({"description": "Test split: kmen4+kmen9+Dub_3b complete + first 15 of hrce_mixed and Dub_praskliny_a",
+    # ── 7) Ulozenie (v4 suffix -- v3 splity ostavaju netknuté) ──
+    with open(SPLITS_DIR / "test_v4_files.json", "w") as f:
+        json.dump({"description": "v4 test split: kmen4+kmen9+Dub_3b complete + first 15 of hrce_mixed and Dub_praskliny_a (identicky s v3)",
                    "n": len(test_rel), "pairs": test_rel}, f, indent=2)
-    with open(SPLITS_DIR / "train_files.json", "w") as f:
-        json.dump({"description": f"Train split: random 80% of remaining pool (seed={SPLIT_SEED})",
+    with open(SPLITS_DIR / "train_v4_files.json", "w") as f:
+        json.dump({"description": f"v4 train split: random 80% of pool (incl. new Dub_praskliny_b), seed={SPLIT_SEED}",
                    "n": len(train_rel), "pairs": train_rel}, f, indent=2)
-    with open(SPLITS_DIR / "val_files.json", "w") as f:
-        json.dump({"description": f"Val split: random 20% of remaining pool (seed={SPLIT_SEED})",
+    with open(SPLITS_DIR / "val_v4_files.json", "w") as f:
+        json.dump({"description": f"v4 val split: random 20% of pool, seed={SPLIT_SEED}",
                    "n": len(val_rel), "pairs": val_rel}, f, indent=2)
-    with open(SPLITS_DIR / "split_stats.json", "w") as f:
+    with open(SPLITS_DIR / "split_stats_v4.json", "w") as f:
         json.dump({
             "class_names": CLASS_NAMES,
             "test_full_trunks": TEST_FULL_TRUNKS,
@@ -196,10 +197,10 @@ def main():
         }, f, indent=2)
 
     print(f"\nSplits ulozene do:")
-    print(f"  {SPLITS_DIR / 'test_files.json'}")
-    print(f"  {SPLITS_DIR / 'train_files.json'}")
-    print(f"  {SPLITS_DIR / 'val_files.json'}")
-    print(f"  {SPLITS_DIR / 'split_stats.json'}")
+    print(f"  {SPLITS_DIR / 'test_v4_files.json'}")
+    print(f"  {SPLITS_DIR / 'train_v4_files.json'}")
+    print(f"  {SPLITS_DIR / 'val_v4_files.json'}")
+    print(f"  {SPLITS_DIR / 'split_stats_v4.json'}")
 
 
 if __name__ == "__main__":

@@ -248,8 +248,8 @@ def main():
     print(f"Epochs  : {NUM_EPOCHS}, patience={PATIENCE}")
 
     # ── Load splits ──
-    train_imgs, train_msks = load_split("train")
-    val_imgs,   val_msks   = load_split("val")
+    train_imgs, train_msks = load_split("train_v3")
+    val_imgs,   val_msks   = load_split("val_v3")
     print(f"Train: {len(train_imgs)}  |  Val: {len(val_imgs)}")
 
     train_ds = WoodLogDataset(train_imgs, train_msks, get_train_transform())

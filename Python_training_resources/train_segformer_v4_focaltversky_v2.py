@@ -1,82 +1,87 @@
 """
-SegFormer-B2  --  Single-phase Training v2  [rnd: random 80/20 split]
-Loss: 35% Weighted CrossEntropy + 65% Weighted Dice
+SegFormer-B2  --  Training v4 + Focal-Tversky Loss V2 (aggressive recall)
+==========================================================================
+Identicke s train_segformer_v4_focaltversky.py okrem agresivnejsich
+beta hodnot pre Nezdravu a Prasklinu:
 
-Zmeny oproti train_segformer_single_rnd.py:
-  1) CosineAnnealingLR(T_max=80, eta_min=1e-7)  -- hladka schedule
-     namiesto schodoviteho ReduceLROnPlateau
-  2) Differential learning rate:
-       encoder (MiT-B2)      : LR * 0.5  (ImageNet features -- pomalsie)
-       decoder (SegFormer hd): LR * 1.0  (nove parametre  -- plnou rychlostou)
+  Trieda          alpha (FP)   beta (FN)   beta/alpha
+  Drevo            0.50         0.50        1.0  (= Dice)
+  Kora             0.50         0.50        1.0  (= Dice)
+  Nezdrava_hrca    0.20         0.80        4.0  (silnejsi recall boost)
+  Okolie           0.50         0.50        1.0  (= Dice)
+  Prasklina        0.10         0.90        9.0  (este silnejsi recall boost)
+
+Cielom je obetovat dalsiu cast IoU/precision pre vyssi recall puklin.
+Predikcia: Prasklina recall ~89-91 %, IoU ~34-37 %.
+
+Vsetko ostatne (data, hyperparametre, splity) je IDENTICKE s v4.
 
 Outputs:
-  net_segformer_b2_single_v2.pth      -- best model weights
-  training_history_single_v2.json     -- per-epoch metrics
+  net_segformer_b2_v4_focaltversky_v2.pth
+  training_history_v4_focaltversky_v2.json
 """
 
-import random
 import json
+import random
+import time
+from pathlib import Path
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
-from pathlib import Path
 from PIL import Image
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import segmentation_models_pytorch as smp
 from tqdm import tqdm
-import time
 
 # ═══════════════════════════════════════════════════════════════════════
 # Configuration
 # ═══════════════════════════════════════════════════════════════════════
 DATA_DIR    = Path(__file__).parent
+SPLITS_DIR  = DATA_DIR / "splits"
 IMAGE_SIZE  = 512
 BATCH_SIZE  = 8
 NUM_CLASSES = 5
 SEED        = 42
-SPLIT_SEED  = 0
-VAL_RATIO   = 0.20
 
 CLASS_NAMES = ["Drevo", "Kora", "Nezdrava_hrca", "Okolie", "Prasklina"]
-
-ALL_TRUNKS = [
-    "kmen1", "kmen2", "kmen3", "kmen4", "kmen5",
-    "kmen6", "kmen7", "kmen8", "kmen9", "kmen10",
-    "Dub_1", "Dub_2", "Dub_3b", "Dub_4", "Dub_5",
-    "Dub_6", "Dub_7", "Dub_8", "Dub_9", "Dub_10",
-    "Dub_praskliny_a", "Dub_praskliny_b",
-]
 
 OVERSAMPLE_PRASKLINA = 6
 OVERSAMPLE_NEZDRAVA  = 3
 
-NUM_EPOCHS    = 80          # fixna dlzka pre cosine schedule
-LR            = 6e-5        # "base" LR = decoder LR
-ENCODER_LR_MULT = 0.5       # encoder dostane LR * 0.5
-WEIGHT_DECAY  = 1e-4
-PATIENCE      = 20
-CE_WEIGHT     = 0.35
-DICE_WEIGHT   = 0.65
-ETA_MIN       = 1e-7
+NUM_EPOCHS  = 200
+LR          = 6e-5
+PATIENCE    = 25
+CE_WEIGHT   = 0.30
+FT_WEIGHT   = 0.70
 
-SAVE_PATH    = DATA_DIR / "net_segformer_b2_single_v2.pth"
-HISTORY_PATH = DATA_DIR / "training_history_single_v2.json"
+# ── Per-class Tversky parametre  V2: agresivnejsie ──
+# Drevo, Kora, Nezdrava_hrca, Okolie, Prasklina
+ALPHA_PER_CLASS = [0.5, 0.5, 0.20, 0.5, 0.10]   # FP penalty
+BETA_PER_CLASS  = [0.5, 0.5, 0.80, 0.5, 0.90]   # FN penalty (b/a = 4.0 a 9.0)
+GAMMA           = 1.33
+
+SAVE_PATH    = DATA_DIR / "net_segformer_b2_v4_focaltversky_v2.pth"
+HISTORY_PATH = DATA_DIR / "training_history_v4_focaltversky_v2.json"
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 MASK_REMAP = np.array([0, 3, 1, 0, 2, 4], dtype=np.uint8)
 
 
 # ═══════════════════════════════════════════════════════════════════════
 # Loss
 # ═══════════════════════════════════════════════════════════════════════
-class DiceLoss(nn.Module):
-    def __init__(self, weight=None, smooth=1.0):
+class FocalTverskyLoss(nn.Module):
+    def __init__(self, weight=None, alpha=None, beta=None,
+                 gamma=1.33, smooth=1.0):
         super().__init__()
         self.weight = weight
+        self.alpha  = alpha
+        self.beta   = beta
+        self.gamma  = gamma
         self.smooth = smooth
 
     def forward(self, inputs, targets):
@@ -84,26 +89,32 @@ class DiceLoss(nn.Module):
         probas     = F.softmax(inputs, dim=1)
         targets_oh = F.one_hot(targets, C).permute(0, 3, 1, 2).float()
         dims = (0, 2, 3)
-        inter = (probas * targets_oh).sum(dims)
-        card  = probas.sum(dims) + targets_oh.sum(dims)
-        dice  = (2.0 * inter + self.smooth) / (card + self.smooth)
+        TP = (probas * targets_oh).sum(dims)
+        FP = (probas * (1 - targets_oh)).sum(dims)
+        FN = ((1 - probas) * targets_oh).sum(dims)
+        TI = (TP + self.smooth) / \
+             (TP + self.alpha * FP + self.beta * FN + self.smooth)
+        focal = (1.0 - TI) ** self.gamma
         if self.weight is not None:
-            dice = dice * self.weight
-            return 1.0 - dice.sum() / self.weight.sum()
-        return 1.0 - dice.mean()
+            focal = focal * self.weight
+            return focal.sum() / self.weight.sum()
+        return focal.mean()
 
 
-class DiceCELoss(nn.Module):
-    def __init__(self, alpha=None, ce_w=0.35, dice_w=0.65):
+class CEFocalTverskyLoss(nn.Module):
+    def __init__(self, alpha_freq=None, alpha_tv=None, beta_tv=None,
+                 ce_w=0.30, ft_w=0.70, gamma=1.33):
         super().__init__()
-        self.ce     = nn.CrossEntropyLoss(weight=alpha)
-        self.dice   = DiceLoss(weight=alpha)
-        self.ce_w   = ce_w
-        self.dice_w = dice_w
+        self.ce = nn.CrossEntropyLoss(weight=alpha_freq)
+        self.ft = FocalTverskyLoss(weight=alpha_freq,
+                                   alpha=alpha_tv, beta=beta_tv,
+                                   gamma=gamma)
+        self.ce_w = ce_w
+        self.ft_w = ft_w
 
     def forward(self, inputs, targets):
         return self.ce_w * self.ce(inputs, targets) + \
-               self.dice_w * self.dice(inputs, targets)
+               self.ft_w * self.ft(inputs, targets)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -118,28 +129,17 @@ def seed_everything(seed):
     torch.backends.cudnn.benchmark = True
 
 
-def collect_all_pairs():
+def load_split(name):
+    path = SPLITS_DIR / f"{name}_files.json"
+    if not path.exists():
+        raise FileNotFoundError(f"Split file {path} neexistuje.")
+    with open(path) as f:
+        data = json.load(f)
     imgs, msks = [], []
-    for trunk in ALL_TRUNKS:
-        img_dir = DATA_DIR / trunk / "images"
-        msk_dir = DATA_DIR / trunk / "masks"
-        for img_path in sorted(img_dir.glob("*.tif")):
-            msk_path = msk_dir / (img_path.stem + ".png")
-            if msk_path.exists():
-                imgs.append(img_path)
-                msks.append(msk_path)
+    for img_rel, msk_rel in data["pairs"]:
+        imgs.append(DATA_DIR / img_rel)
+        msks.append(DATA_DIR / msk_rel)
     return imgs, msks
-
-
-def random_split(imgs, msks, val_ratio, seed):
-    n   = len(imgs)
-    rng = np.random.RandomState(seed)
-    idx = rng.permutation(n)
-    n_val     = round(val_ratio * n)
-    val_idx   = idx[:n_val]
-    train_idx = idx[n_val:]
-    return ([imgs[i] for i in train_idx], [msks[i] for i in train_idx],
-            [imgs[i] for i in val_idx],   [msks[i] for i in val_idx])
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -212,6 +212,15 @@ def compute_iou(preds, targets, num_classes):
     return ious
 
 
+def compute_recall(preds, targets, num_classes):
+    recalls = []
+    for c in range(num_classes):
+        tp = ((preds == c) & (targets == c)).sum().item()
+        fn = ((preds != c) & (targets == c)).sum().item()
+        recalls.append(tp / (tp + fn) if (tp + fn) > 0 else float("nan"))
+    return recalls
+
+
 def train_one_epoch(model, loader, criterion, optimizer, scaler):
     model.train()
     total_loss = 0.0
@@ -234,7 +243,8 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler):
 def validate(model, loader, criterion):
     model.eval()
     total_loss = 0.0
-    all_ious = [[] for _ in range(NUM_CLASSES)]
+    all_ious    = [[] for _ in range(NUM_CLASSES)]
+    all_recalls = [[] for _ in range(NUM_CLASSES)]
     for imgs, msks in tqdm(loader, desc="Val", leave=False):
         imgs = imgs.to(DEVICE, non_blocking=True)
         msks = msks.to(DEVICE, non_blocking=True)
@@ -246,31 +256,13 @@ def validate(model, loader, criterion):
         for c, iou in enumerate(compute_iou(preds.cpu(), msks.cpu(), NUM_CLASSES)):
             if not np.isnan(iou):
                 all_ious[c].append(iou)
-    class_ious = [np.mean(v) if v else 0.0 for v in all_ious]
-    return total_loss / len(loader), class_ious, float(np.nanmean(class_ious))
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# Optimizer: differential LR (encoder slower, decoder faster)
-# ═══════════════════════════════════════════════════════════════════════
-def build_optimizer(model, base_lr, encoder_mult, weight_decay):
-    encoder_params, decoder_params = [], []
-    for name, p in model.named_parameters():
-        if not p.requires_grad:
-            continue
-        if name.startswith("encoder."):
-            encoder_params.append(p)
-        else:
-            decoder_params.append(p)
-    param_groups = [
-        {"params": encoder_params, "lr": base_lr * encoder_mult, "name": "encoder"},
-        {"params": decoder_params, "lr": base_lr,               "name": "decoder"},
-    ]
-    print(f"  Encoder params: {sum(p.numel() for p in encoder_params)/1e6:.1f}M  "
-          f"-> LR = {base_lr * encoder_mult:.2e}")
-    print(f"  Decoder params: {sum(p.numel() for p in decoder_params)/1e6:.1f}M  "
-          f"-> LR = {base_lr:.2e}")
-    return torch.optim.AdamW(param_groups, weight_decay=weight_decay)
+        for c, r in enumerate(compute_recall(preds.cpu(), msks.cpu(), NUM_CLASSES)):
+            if not np.isnan(r):
+                all_recalls[c].append(r)
+    class_ious    = [np.mean(v) if v else 0.0 for v in all_ious]
+    class_recalls = [np.mean(v) if v else 0.0 for v in all_recalls]
+    return total_loss / len(loader), class_ious, class_recalls, \
+           float(np.nanmean(class_ious))
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -283,16 +275,20 @@ def main():
     print(f"CUDA    : {torch.cuda.is_available()} -- "
           f"{torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A'}")
     print(f"Device  : {DEVICE}")
-    print(f"Split   : random 80/20  (seed={SPLIT_SEED})")
-    print(f"Loss    : {CE_WEIGHT:.0%} CE + {DICE_WEIGHT:.0%} Dice")
-    print(f"Schedule: CosineAnnealingLR  T_max={NUM_EPOCHS}  eta_min={ETA_MIN}")
-    print(f"LR      : decoder={LR}, encoder={LR*ENCODER_LR_MULT}")
+    print(f"Splits  : hybrid (full data) -- splits/{{train,val}}_files.json")
+    print(f"Loss    : {CE_WEIGHT:.0%} CE + {FT_WEIGHT:.0%} Focal-Tversky V2 (aggressive)")
+    print(f"Epochs  : {NUM_EPOCHS}, patience={PATIENCE}")
 
-    all_imgs, all_msks = collect_all_pairs()
-    train_imgs, train_msks, val_imgs, val_msks = random_split(
-        all_imgs, all_msks, VAL_RATIO, SPLIT_SEED
-    )
-    print(f"Train: {len(train_imgs)}  |  Val: {len(val_imgs)}")
+    print(f"\nPer-class Tversky alpha/beta:")
+    print(f"  {'Trieda':<18} {'alpha':>6} {'beta':>6} {'beta/alpha':>10}")
+    for i, name in enumerate(CLASS_NAMES):
+        a, b = ALPHA_PER_CLASS[i], BETA_PER_CLASS[i]
+        ratio = b / a if a > 0 else float("inf")
+        print(f"  {name:<18} {a:>6.2f} {b:>6.2f} {ratio:>10.2f}")
+
+    train_imgs, train_msks = load_split("train_v4")
+    val_imgs,   val_msks   = load_split("val_v4")
+    print(f"\nTrain: {len(train_imgs)}  |  Val: {len(val_imgs)}")
 
     train_ds = WoodLogDataset(train_imgs, train_msks, get_train_transform())
     val_ds   = WoodLogDataset(val_imgs,   val_msks,   get_val_transform())
@@ -309,42 +305,42 @@ def main():
     val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False,
                               num_workers=0, pin_memory=True)
 
-    # ── Class weights ──
-    print("\nComputing class pixel frequencies...")
+    print("\nComputing class pixel frequencies (full train)...")
     pixel_counts = np.zeros(NUM_CLASSES, dtype=np.int64)
     for msk_raw in train_ds.masks_raw:
         msk_py = MASK_REMAP[msk_raw]
         for c in range(NUM_CLASSES):
             pixel_counts[c] += int((msk_py == c).sum())
 
-    freq  = pixel_counts / pixel_counts.sum()
-    alpha = torch.tensor(np.median(freq) / freq, dtype=torch.float32).to(DEVICE)
-    alpha = torch.clamp(alpha, max=20.0)
+    freq       = pixel_counts / pixel_counts.sum()
+    alpha_freq = torch.tensor(np.median(freq) / freq, dtype=torch.float32).to(DEVICE)
+    alpha_freq = torch.clamp(alpha_freq, max=20.0)
 
     print(f"{'Class':<18} {'Freq %':>8} {'Weight':>8}")
     print("-" * 36)
     for i, name in enumerate(CLASS_NAMES):
-        print(f"  {name:<16} {freq[i]*100:>7.3f}% {alpha[i].item():>8.2f}")
+        print(f"  {name:<16} {freq[i]*100:>7.3f}% {alpha_freq[i].item():>8.2f}")
 
-    # ── Model ──
+    alpha_tv = torch.tensor(ALPHA_PER_CLASS, dtype=torch.float32).to(DEVICE)
+    beta_tv  = torch.tensor(BETA_PER_CLASS,  dtype=torch.float32).to(DEVICE)
+
     model = smp.create_model(
         arch="segformer", encoder_name="mit_b2",
         encoder_weights="imagenet", in_channels=3, classes=NUM_CLASSES,
     ).to(DEVICE)
     print(f"\nModel: SegFormer-B2, {sum(p.numel() for p in model.parameters())/1e6:.1f}M params")
 
-    criterion = DiceCELoss(alpha=alpha, ce_w=CE_WEIGHT, dice_w=DICE_WEIGHT)
-
-    print("\nBuilding optimizer with differential LR...")
-    optimizer = build_optimizer(model, base_lr=LR,
-                                encoder_mult=ENCODER_LR_MULT,
-                                weight_decay=WEIGHT_DECAY)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=NUM_EPOCHS, eta_min=ETA_MIN
+    criterion = CEFocalTverskyLoss(
+        alpha_freq=alpha_freq,
+        alpha_tv=alpha_tv, beta_tv=beta_tv,
+        ce_w=CE_WEIGHT, ft_w=FT_WEIGHT, gamma=GAMMA,
+    )
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="max", factor=0.5, patience=5, min_lr=1e-7
     )
     scaler = torch.amp.GradScaler("cuda")
 
-    # ── Training loop ──
     best_miou   = 0.0
     pat_counter = 0
     history     = []
@@ -352,9 +348,9 @@ def main():
 
     header = (f"{'Ep':>4} | {'TrLoss':>8} | {'VaLoss':>8} | {'mIoU':>7} | "
               + " | ".join(f"{n:>{col_w}}" for n in CLASS_NAMES)
-              + " | LR(dec)")
+              + " | LR")
     print(f"\n{'='*len(header)}")
-    print(f"  Single-phase v2 : cosine + diff-LR")
+    print(f"  v4 + FOCAL-TVERSKY V2 (aggressive): beta_nez=0.80, beta_prask=0.90")
     print(f"{'='*len(header)}")
     print(header)
     print(f"{'-'*len(header)}")
@@ -362,33 +358,33 @@ def main():
     for epoch in range(1, NUM_EPOCHS + 1):
         t0 = time.time()
         tr_loss = train_one_epoch(model, train_loader, criterion, optimizer, scaler)
-        va_loss, class_ious, miou = validate(model, val_loader, criterion)
-        scheduler.step()
+        va_loss, class_ious, class_recalls, miou = validate(model, val_loader, criterion)
+        scheduler.step(miou)
 
-        lr_dec  = optimizer.param_groups[1]["lr"]   # decoder group
-        lr_enc  = optimizer.param_groups[0]["lr"]   # encoder group
+        lr_now  = optimizer.param_groups[0]["lr"]
         elapsed = time.time() - t0
 
         record = {
             "epoch": epoch, "train_loss": tr_loss, "val_loss": va_loss,
             "mean_iou": miou, "class_ious": class_ious,
-            "lr_encoder": lr_enc, "lr_decoder": lr_dec,
+            "class_recalls": class_recalls, "lr": lr_now,
         }
         history.append(record)
         with open(HISTORY_PATH, "w") as f:
             json.dump({
                 "class_names": CLASS_NAMES,
-                "split": "random_80_20", "split_seed": SPLIT_SEED,
-                "loss": f"{CE_WEIGHT} CE + {DICE_WEIGHT} Dice",
-                "schedule": f"CosineAnnealingLR T_max={NUM_EPOCHS} eta_min={ETA_MIN}",
-                "encoder_lr_mult": ENCODER_LR_MULT,
+                "loss": f"{CE_WEIGHT} CE + {FT_WEIGHT} Focal-Tversky V2",
+                "alpha_per_class": ALPHA_PER_CLASS,
+                "beta_per_class":  BETA_PER_CLASS,
+                "gamma": GAMMA,
                 "history": history,
             }, f, indent=2)
 
         iou_str = " | ".join(f"{v*100:>{col_w}.1f}%" for v in class_ious)
         tag = " << best" if miou > best_miou else ""
         print(f"{epoch:>4} | {tr_loss:>8.4f} | {va_loss:>8.4f} | {miou*100:>6.2f}% | "
-              f"{iou_str} | {lr_dec:.2e} | {elapsed:.0f}s{tag}")
+              f"{iou_str} | {lr_now:.2e} | {elapsed:.0f}s{tag}")
+        print(f"     Recalls: Nez={class_recalls[2]*100:.1f}%  Prask={class_recalls[4]*100:.1f}%")
 
         if miou > best_miou:
             best_miou   = miou
@@ -401,7 +397,7 @@ def main():
             print(f"\nEarly stopping at epoch {epoch} (patience={PATIENCE})")
             break
 
-    print(f"\nSingle-phase v2 done. Best mIoU: {best_miou*100:.2f}%")
+    print(f"\nv4 Focal-Tversky V2 done. Best mIoU: {best_miou*100:.2f}%")
     print(f"Weights : {SAVE_PATH}")
     print(f"History : {HISTORY_PATH}")
 

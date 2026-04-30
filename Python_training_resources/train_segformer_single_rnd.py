@@ -47,7 +47,7 @@ ALL_TRUNKS = [
     "kmen6", "kmen7", "kmen8", "kmen9", "kmen10",
     "Dub_1", "Dub_2", "Dub_3b", "Dub_4", "Dub_5",
     "Dub_6", "Dub_7", "Dub_8", "Dub_9", "Dub_10",
-    "Dub_praskliny_a",
+    "Dub_praskliny_a", "Dub_praskliny_b",
 ]
 
 OVERSAMPLE_PRASKLINA = 6

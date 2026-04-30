@@ -28,7 +28,7 @@ from tqdm import tqdm
 
 # ── Config ───────────────────────────────────────────────────────────────
 DATA_DIR    = Path(__file__).parent
-TEST_SPLIT  = DATA_DIR / "splits" / "test_files.json"
+TEST_SPLIT  = DATA_DIR / "splits" / "test_v3_files.json"
 IMAGE_SIZE  = 512
 NUM_CLASSES = 5
 

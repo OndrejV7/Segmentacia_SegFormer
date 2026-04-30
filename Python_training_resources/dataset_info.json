@@ -1,6 +1,6 @@
 {
   "project": "SegFormer semantic segmentation - tree cross-sections",
-  "description": "Annotated CT/scan cross-sections of oak and pine trunks. Masks contain uint8 values 1-5 (MATLAB PixelLabelID). Subtract 1 for 0-indexed class IDs expected by most frameworks.",
+  "description": "Annotated CT/scan cross-sections of oak trunks (despite 'kmen' prefix in some folder names, all data is oak). Masks contain uint8 values 1-5 (MATLAB PixelLabelID). Subtract 1 for 0-indexed class IDs expected by most frameworks.",
   "mask_format": {
     "dtype": "uint8",
     "values": "1-5 (MATLAB convention, 1-indexed)",
@@ -39,10 +39,11 @@
     {"name": "Dub_9",    "type": "dub",  "num_pairs": 64,  "notes": ""},
     {"name": "Dub_10",   "type": "dub",  "num_pairs": 64,  "notes": ""},
     {"name": "hrce_mixed","type": "mixed","num_pairs": 94,  "notes": "Mixed oak dataset. Two images (098.tif, 099.tif) had no annotation and were excluded. Original source had 96 images."},
-    {"name": "Dub_praskliny_a","type": "dub","num_pairs": 50, "notes": "Hand-picked oak scans from '100 ks Dub praskliny_a' source, annotated specifically for crack detection. Prasklina present in all 50 images (vs ~3.5% in the rest of the dataset). Added 2026-04-25 from gTruth_praskliny_1a.mat."}
+    {"name": "Dub_praskliny_a","type": "dub","num_pairs": 50, "notes": "Hand-picked oak scans from '100 ks Dub praskliny_a' source (images 001-050), annotated specifically for crack detection. Prasklina present in all 50 images. Added 2026-04-25 from gTruth_praskliny_1a.mat."},
+    {"name": "Dub_praskliny_b","type": "dub","num_pairs": 50, "notes": "Continuation of Dub_praskliny series, source '100 ks Dub praskliny_b' (images 051-100). Prasklina present in all 50 images, density 0.258% (slightly higher than 1a). Added 2026-04-29 from gTruth_praskliny_1b.mat. Together with Dub_praskliny_a covers the full original 100-piece oak crack collection."}
   ],
-  "total_pairs": 1491,
+  "total_pairs": 1541,
   "kmen_series_total": 704,
-  "dub_series_total": 693,
+  "dub_series_total": 743,
   "mixed_total": 94
 }

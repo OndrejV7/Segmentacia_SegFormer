@@ -1,72 +1,63 @@
 """
-SegFormer-B2  --  Single-phase Training v2  [rnd: random 80/20 split]
-Loss: 35% Weighted CrossEntropy + 65% Weighted Dice
+SegFormer-B2  --  Training v4
+==============================
+Single-phase tréning s loss CE 0.30 + Dice 0.70 (víťaz sweep-u 2026-04-21).
 
 Zmeny oproti train_segformer_single_rnd.py:
-  1) CosineAnnealingLR(T_max=80, eta_min=1e-7)  -- hladka schedule
-     namiesto schodoviteho ReduceLROnPlateau
-  2) Differential learning rate:
-       encoder (MiT-B2)      : LR * 0.5  (ImageNet features -- pomalsie)
-       decoder (SegFormer hd): LR * 1.0  (nove parametre  -- plnou rychlostou)
+  1) Splity sa nacitavaju z splits/{train,val}_files.json
+     (vytvorene cez make_splits.py) -- explicit train/val/test
+     so spravnym trunk-level test holdout-om
+  2) CE_WEIGHT=0.30, DICE_WEIGHT=0.70 (sweep winner +1.14 pp mIoU)
+  3) NUM_EPOCHS=200, PATIENCE=25 -- kvoli pomalsej konvergencii pri
+     vyssej Dice vahe (sweep ukazal best ep=98 z 100)
+  4) Datasety obsahuju aj Dub_praskliny_a (50 novych snimok)
 
 Outputs:
-  net_segformer_b2_single_v2.pth      -- best model weights
-  training_history_single_v2.json     -- per-epoch metrics
+  net_segformer_b2_v4.pth     -- best model weights
+  training_history_v4.json    -- per-epoch metrics
 """
 
-import random
 import json
+import random
+import time
+from pathlib import Path
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
-from pathlib import Path
 from PIL import Image
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import segmentation_models_pytorch as smp
 from tqdm import tqdm
-import time
 
 # ═══════════════════════════════════════════════════════════════════════
 # Configuration
 # ═══════════════════════════════════════════════════════════════════════
 DATA_DIR    = Path(__file__).parent
+SPLITS_DIR  = DATA_DIR / "splits"
 IMAGE_SIZE  = 512
 BATCH_SIZE  = 8
 NUM_CLASSES = 5
 SEED        = 42
-SPLIT_SEED  = 0
-VAL_RATIO   = 0.20
 
 CLASS_NAMES = ["Drevo", "Kora", "Nezdrava_hrca", "Okolie", "Prasklina"]
-
-ALL_TRUNKS = [
-    "kmen1", "kmen2", "kmen3", "kmen4", "kmen5",
-    "kmen6", "kmen7", "kmen8", "kmen9", "kmen10",
-    "Dub_1", "Dub_2", "Dub_3b", "Dub_4", "Dub_5",
-    "Dub_6", "Dub_7", "Dub_8", "Dub_9", "Dub_10",
-    "Dub_praskliny_a", "Dub_praskliny_b",
-]
 
 OVERSAMPLE_PRASKLINA = 6
 OVERSAMPLE_NEZDRAVA  = 3
 
-NUM_EPOCHS    = 80          # fixna dlzka pre cosine schedule
-LR            = 6e-5        # "base" LR = decoder LR
-ENCODER_LR_MULT = 0.5       # encoder dostane LR * 0.5
-WEIGHT_DECAY  = 1e-4
-PATIENCE      = 20
-CE_WEIGHT     = 0.35
-DICE_WEIGHT   = 0.65
-ETA_MIN       = 1e-7
+NUM_EPOCHS  = 200       # zvysene zo 100
+LR          = 6e-5
+PATIENCE    = 25        # zvysene zo 20
+CE_WEIGHT   = 0.30      # sweep winner
+DICE_WEIGHT = 0.70      # sweep winner
 
-SAVE_PATH    = DATA_DIR / "net_segformer_b2_single_v2.pth"
-HISTORY_PATH = DATA_DIR / "training_history_single_v2.json"
+SAVE_PATH    = DATA_DIR / "net_segformer_b2_v4.pth"
+HISTORY_PATH = DATA_DIR / "training_history_v4.json"
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 MASK_REMAP = np.array([0, 3, 1, 0, 2, 4], dtype=np.uint8)
 
 
@@ -94,7 +85,7 @@ class DiceLoss(nn.Module):
 
 
 class DiceCELoss(nn.Module):
-    def __init__(self, alpha=None, ce_w=0.35, dice_w=0.65):
+    def __init__(self, alpha=None, ce_w=0.30, dice_w=0.70):
         super().__init__()
         self.ce     = nn.CrossEntropyLoss(weight=alpha)
         self.dice   = DiceLoss(weight=alpha)
@@ -118,28 +109,20 @@ def seed_everything(seed):
     torch.backends.cudnn.benchmark = True
 
 
-def collect_all_pairs():
+def load_split(name):
+    """Nacita split JSON a vrati zoznamy absolutnych ciest (img, msk)."""
+    path = SPLITS_DIR / f"{name}_files.json"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Split file {path} neexistuje. Spusti najprv 'python make_splits.py'."
+        )
+    with open(path) as f:
+        data = json.load(f)
     imgs, msks = [], []
-    for trunk in ALL_TRUNKS:
-        img_dir = DATA_DIR / trunk / "images"
-        msk_dir = DATA_DIR / trunk / "masks"
-        for img_path in sorted(img_dir.glob("*.tif")):
-            msk_path = msk_dir / (img_path.stem + ".png")
-            if msk_path.exists():
-                imgs.append(img_path)
-                msks.append(msk_path)
+    for img_rel, msk_rel in data["pairs"]:
+        imgs.append(DATA_DIR / img_rel)
+        msks.append(DATA_DIR / msk_rel)
     return imgs, msks
-
-
-def random_split(imgs, msks, val_ratio, seed):
-    n   = len(imgs)
-    rng = np.random.RandomState(seed)
-    idx = rng.permutation(n)
-    n_val     = round(val_ratio * n)
-    val_idx   = idx[:n_val]
-    train_idx = idx[n_val:]
-    return ([imgs[i] for i in train_idx], [msks[i] for i in train_idx],
-            [imgs[i] for i in val_idx],   [msks[i] for i in val_idx])
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -251,29 +234,6 @@ def validate(model, loader, criterion):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Optimizer: differential LR (encoder slower, decoder faster)
-# ═══════════════════════════════════════════════════════════════════════
-def build_optimizer(model, base_lr, encoder_mult, weight_decay):
-    encoder_params, decoder_params = [], []
-    for name, p in model.named_parameters():
-        if not p.requires_grad:
-            continue
-        if name.startswith("encoder."):
-            encoder_params.append(p)
-        else:
-            decoder_params.append(p)
-    param_groups = [
-        {"params": encoder_params, "lr": base_lr * encoder_mult, "name": "encoder"},
-        {"params": decoder_params, "lr": base_lr,               "name": "decoder"},
-    ]
-    print(f"  Encoder params: {sum(p.numel() for p in encoder_params)/1e6:.1f}M  "
-          f"-> LR = {base_lr * encoder_mult:.2e}")
-    print(f"  Decoder params: {sum(p.numel() for p in decoder_params)/1e6:.1f}M  "
-          f"-> LR = {base_lr:.2e}")
-    return torch.optim.AdamW(param_groups, weight_decay=weight_decay)
-
-
-# ═══════════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════════
 def main():
@@ -283,15 +243,13 @@ def main():
     print(f"CUDA    : {torch.cuda.is_available()} -- "
           f"{torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A'}")
     print(f"Device  : {DEVICE}")
-    print(f"Split   : random 80/20  (seed={SPLIT_SEED})")
+    print(f"Splits  : {SPLITS_DIR}")
     print(f"Loss    : {CE_WEIGHT:.0%} CE + {DICE_WEIGHT:.0%} Dice")
-    print(f"Schedule: CosineAnnealingLR  T_max={NUM_EPOCHS}  eta_min={ETA_MIN}")
-    print(f"LR      : decoder={LR}, encoder={LR*ENCODER_LR_MULT}")
+    print(f"Epochs  : {NUM_EPOCHS}, patience={PATIENCE}")
 
-    all_imgs, all_msks = collect_all_pairs()
-    train_imgs, train_msks, val_imgs, val_msks = random_split(
-        all_imgs, all_msks, VAL_RATIO, SPLIT_SEED
-    )
+    # ── Load splits ──
+    train_imgs, train_msks = load_split("train_v4")
+    val_imgs,   val_msks   = load_split("val_v4")
     print(f"Train: {len(train_imgs)}  |  Val: {len(val_imgs)}")
 
     train_ds = WoodLogDataset(train_imgs, train_msks, get_train_transform())
@@ -310,7 +268,7 @@ def main():
                               num_workers=0, pin_memory=True)
 
     # ── Class weights ──
-    print("\nComputing class pixel frequencies...")
+    print("\nComputing class pixel frequencies (train only)...")
     pixel_counts = np.zeros(NUM_CLASSES, dtype=np.int64)
     for msk_raw in train_ds.masks_raw:
         msk_py = MASK_REMAP[msk_raw]
@@ -334,13 +292,9 @@ def main():
     print(f"\nModel: SegFormer-B2, {sum(p.numel() for p in model.parameters())/1e6:.1f}M params")
 
     criterion = DiceCELoss(alpha=alpha, ce_w=CE_WEIGHT, dice_w=DICE_WEIGHT)
-
-    print("\nBuilding optimizer with differential LR...")
-    optimizer = build_optimizer(model, base_lr=LR,
-                                encoder_mult=ENCODER_LR_MULT,
-                                weight_decay=WEIGHT_DECAY)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=NUM_EPOCHS, eta_min=ETA_MIN
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="max", factor=0.5, patience=5, min_lr=1e-7
     )
     scaler = torch.amp.GradScaler("cuda")
 
@@ -352,9 +306,9 @@ def main():
 
     header = (f"{'Ep':>4} | {'TrLoss':>8} | {'VaLoss':>8} | {'mIoU':>7} | "
               + " | ".join(f"{n:>{col_w}}" for n in CLASS_NAMES)
-              + " | LR(dec)")
+              + " | LR")
     print(f"\n{'='*len(header)}")
-    print(f"  Single-phase v2 : cosine + diff-LR")
+    print(f"  v4: {CE_WEIGHT:.0%} CE + {DICE_WEIGHT:.0%} Dice  |  LR={LR}  |  hybrid split")
     print(f"{'='*len(header)}")
     print(header)
     print(f"{'-'*len(header)}")
@@ -363,32 +317,30 @@ def main():
         t0 = time.time()
         tr_loss = train_one_epoch(model, train_loader, criterion, optimizer, scaler)
         va_loss, class_ious, miou = validate(model, val_loader, criterion)
-        scheduler.step()
+        scheduler.step(miou)
 
-        lr_dec  = optimizer.param_groups[1]["lr"]   # decoder group
-        lr_enc  = optimizer.param_groups[0]["lr"]   # encoder group
+        lr_now  = optimizer.param_groups[0]["lr"]
         elapsed = time.time() - t0
 
         record = {
             "epoch": epoch, "train_loss": tr_loss, "val_loss": va_loss,
-            "mean_iou": miou, "class_ious": class_ious,
-            "lr_encoder": lr_enc, "lr_decoder": lr_dec,
+            "mean_iou": miou, "class_ious": class_ious, "lr": lr_now,
         }
         history.append(record)
         with open(HISTORY_PATH, "w") as f:
             json.dump({
                 "class_names": CLASS_NAMES,
-                "split": "random_80_20", "split_seed": SPLIT_SEED,
+                "split_source": "splits/{train,val}_files.json (hybrid trunk-level test holdout)",
                 "loss": f"{CE_WEIGHT} CE + {DICE_WEIGHT} Dice",
-                "schedule": f"CosineAnnealingLR T_max={NUM_EPOCHS} eta_min={ETA_MIN}",
-                "encoder_lr_mult": ENCODER_LR_MULT,
+                "num_epochs_max": NUM_EPOCHS,
+                "patience": PATIENCE,
                 "history": history,
             }, f, indent=2)
 
         iou_str = " | ".join(f"{v*100:>{col_w}.1f}%" for v in class_ious)
         tag = " << best" if miou > best_miou else ""
         print(f"{epoch:>4} | {tr_loss:>8.4f} | {va_loss:>8.4f} | {miou*100:>6.2f}% | "
-              f"{iou_str} | {lr_dec:.2e} | {elapsed:.0f}s{tag}")
+              f"{iou_str} | {lr_now:.2e} | {elapsed:.0f}s{tag}")
 
         if miou > best_miou:
             best_miou   = miou
@@ -401,7 +353,7 @@ def main():
             print(f"\nEarly stopping at epoch {epoch} (patience={PATIENCE})")
             break
 
-    print(f"\nSingle-phase v2 done. Best mIoU: {best_miou*100:.2f}%")
+    print(f"\nv4 done. Best mIoU: {best_miou*100:.2f}%")
     print(f"Weights : {SAVE_PATH}")
     print(f"History : {HISTORY_PATH}")
 

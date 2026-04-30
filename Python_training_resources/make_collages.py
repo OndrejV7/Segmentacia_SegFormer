@@ -22,7 +22,7 @@ from PIL import Image, ImageDraw
 
 # ── Config ───────────────────────────────────────────────────────────────
 DATA_DIR    = Path(__file__).parent
-TEST_SPLIT  = DATA_DIR / "splits" / "test_files.json"
+TEST_SPLIT  = DATA_DIR / "splits" / "test_v3_files.json"
 DEFAULT_TAG = "v3"     # zhoda s evaluate_test.py default modelom
 IMAGE_SIZE  = 512
 OVERLAY_A   = 0.45

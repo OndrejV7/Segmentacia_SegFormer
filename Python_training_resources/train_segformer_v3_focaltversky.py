@@ -307,8 +307,8 @@ def main():
         ratio = b / a if a > 0 else float("inf")
         print(f"  {name:<18} {a:>6.2f} {b:>6.2f} {ratio:>10.2f}")
 
-    train_imgs, train_msks = load_split("train")
-    val_imgs,   val_msks   = load_split("val")
+    train_imgs, train_msks = load_split("train_v3")
+    val_imgs,   val_msks   = load_split("val_v3")
     print(f"\nTrain: {len(train_imgs)}  |  Val: {len(val_imgs)}")
 
     train_ds = WoodLogDataset(train_imgs, train_msks, get_train_transform())
