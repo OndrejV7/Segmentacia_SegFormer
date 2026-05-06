@@ -34,58 +34,58 @@
     },
     "Prasklina": {
       "iou": 0.4647,
-      "dice": 0.6345,
-      "precision": 0.5518,
+      "dice": 0.6346,
+      "precision": 0.5519,
       "recall": 0.7464,
-      "f1": 0.6345,
+      "f1": 0.6346,
       "support": 71841
     }
   },
   "mean_iou": 0.7987,
   "mean_dice": 0.874,
-  "mean_precision": 0.8506,
-  "mean_recall": 0.9092,
+  "mean_precision": 0.8507,
+  "mean_recall": 0.9093,
   "mean_f1": 0.874,
   "pixel_accuracy": 0.9923,
   "total_pixels": 124882711,
   "confusion_matrix": [
     [
-      28653451,
-      294788,
-      3358,
-      19211,
-      43208
+      28653469,
+      294768,
+      3359,
+      19215,
+      43205
     ],
     [
       60557,
-      2522730,
+      2522729,
       0,
-      3183,
+      3184,
       35
     ],
     [
-      9562,
+      9561,
       0,
-      51783,
+      51784,
       6,
       119
     ],
     [
-      43372,
-      468940,
+      43381,
+      468947,
       0,
-      92636383,
+      92636367,
       184
     ],
     [
-      18035,
+      18032,
       97,
       28,
       61,
-      53620
+      53623
     ]
   ],
   "model": "net_segformer_b2_v4.pth",
-  "test_split": "splits/test_v4_files.json",
+  "test_split": "splits/test_v3_files.json",
   "n_images": 222
 }
